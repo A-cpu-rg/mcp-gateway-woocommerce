@@ -1,0 +1,80 @@
+import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
+import { test } from 'node:test';
+import { decrypt, encrypt, hashPassword, newApiKey, parseApiKey, verifyPassword } from '../src/crypto.ts';
+import { exposedToolName, slugOf } from '../src/upstreams.ts';
+import { checkAddress, createGuardedFetch, hostAllowed, validateUpstreamUrl } from '../src/url-guard.ts';
+
+const CLUSTER = ['*.svc.cluster.local'];
+
+test('url guard: metadata and link-local are blocked even for allow-listed hosts', () => {
+  assert.throws(() => checkAddress('x.svc.cluster.local', '169.254.169.254', CLUSTER));
+  assert.throws(() => checkAddress('x.svc.cluster.local', '::ffff:169.254.169.254', CLUSTER));
+  assert.throws(() => checkAddress('x.svc.cluster.local', 'fe80::1', CLUSTER));
+  assert.throws(() => checkAddress('x.svc.cluster.local', '0.0.0.0', CLUSTER));
+});
+
+test('url guard: private ranges only for allow-listed hosts; public addresses allowed', () => {
+  assert.doesNotThrow(() => checkAddress('woo.store.svc.cluster.local', '10.43.0.12', CLUSTER));
+  assert.throws(() => checkAddress('evil.example.com', '10.43.0.12', CLUSTER));
+  assert.throws(() => checkAddress('evil.example.com', '127.0.0.1', CLUSTER));
+  assert.throws(() => checkAddress('evil.example.com', '::1', CLUSTER));
+  assert.doesNotThrow(() => checkAddress('mcp.example.com', '93.184.216.34', CLUSTER));
+  assert.equal(hostAllowed('a.svc.cluster.local.', CLUSTER), true);
+  assert.equal(hostAllowed('svc.cluster.local.evil.com', CLUSTER), false);
+});
+
+test('url guard: registration resolves names and checks every address', async () => {
+  const resolver = async () => ['93.184.216.34', '169.254.169.254'];
+  await assert.rejects(validateUpstreamUrl('https://mixed.example.com/mcp', CLUSTER, resolver));
+  const ok = await validateUpstreamUrl('https://mcp.example.com/mcp#frag', CLUSTER, async () => [
+    '93.184.216.34',
+  ]);
+  assert.equal(ok, 'https://mcp.example.com/mcp');
+});
+
+test('url guard: connection-time check blocks a name that resolves to loopback (DNS rebinding)', async () => {
+  // "localhost" is not on the allow-list, so even if it passed registration earlier, dialling it fails.
+  const guarded = createGuardedFetch(CLUSTER);
+  await assert.rejects(guarded('http://localhost:8999/mcp'), (err: Error) =>
+    /not on the allow-list/.test(String((err as { cause?: Error }).cause?.message ?? err.message)),
+  );
+  await assert.rejects(guarded('http://169.254.169.254/latest/meta-data/'), /never allowed/);
+});
+
+test('credential encryption: round trip, random IV, tamper detection', () => {
+  const key = randomBytes(32);
+  const a = encrypt(key, 'secret');
+  assert.equal(decrypt(key, a), 'secret');
+  assert.notDeepEqual(a, encrypt(key, 'secret'));
+  a[a.length - 1] = (a[a.length - 1] as number) ^ 1;
+  assert.throws(() => decrypt(key, a));
+  assert.throws(() => decrypt(randomBytes(32), encrypt(key, 'x')));
+});
+
+test('api keys: format, parsing and hashing', () => {
+  const k = newApiKey();
+  assert.match(k.token, /^mgw_[0-9a-f]{12}_[A-Za-z0-9_-]{43}$/);
+  assert.equal(parseApiKey(k.token)?.id, k.id);
+  assert.equal(parseApiKey('mgw_xyz'), null);
+  assert.equal(parseApiKey(`${k.token}x`), null);
+});
+
+test('passwords: scrypt verify', async () => {
+  const h = await hashPassword('correct horse');
+  assert.equal(await verifyPassword('correct horse', h), true);
+  assert.equal(await verifyPassword('wrong', h), false);
+  assert.equal(await verifyPassword('x', null), false);
+});
+
+test('tool naming: namespaced, LLM-safe, collision resistant', () => {
+  assert.equal(exposedToolName('woocommerce', 'list_orders'), 'woocommerce__list_orders');
+  const weird = exposedToolName('srv', 'files/read.v2');
+  assert.match(weird, /^[a-zA-Z0-9_-]{1,64}$/);
+  assert.notEqual(weird, exposedToolName('srv', 'files_read_v2'));
+  const long = exposedToolName('a-very-long-server-slug', 'x'.repeat(100));
+  assert.ok(long.length <= 64);
+  assert.notEqual(long, exposedToolName('a-very-long-server-slug', `${'x'.repeat(99)}y`));
+  assert.equal(slugOf('woocommerce__list_orders'), 'woocommerce');
+  assert.equal(slugOf('__x'), null);
+});
