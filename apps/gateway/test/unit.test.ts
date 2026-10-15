@@ -78,3 +78,42 @@ test('tool naming: namespaced, LLM-safe, collision resistant', () => {
   assert.equal(slugOf('woocommerce__list_orders'), 'woocommerce');
   assert.equal(slugOf('__x'), null);
 });
+
+test('Azure OpenAI adapter: deployment URL, api-key header, tool-call parsing', async () => {
+  const { openAiCompatibleModel } = await import('../src/agent.ts');
+  let seen: { url: string; headers: Record<string, string>; body: Record<string, unknown> } | undefined;
+  const model = openAiCompatibleModel(
+    {
+      provider: 'azure',
+      endpoint: 'https://navis-openai.openai.azure.com/',
+      apiKey: 'k-123',
+      model: 'navis-gpt',
+      apiVersion: '2024-12-01-preview',
+    },
+    async (url, init) => {
+      seen = {
+        url: String(url),
+        headers: init?.headers as Record<string, string>,
+        body: JSON.parse(String(init?.body)),
+      };
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: null,
+              tool_calls: [{ id: 't1', type: 'function', function: { name: 'a__b', arguments: '{}' } }],
+            },
+          },
+        ],
+      });
+    },
+  );
+  const reply = await model([{ role: 'user', content: 'hi' }], []);
+  assert.equal(
+    seen?.url,
+    'https://navis-openai.openai.azure.com/openai/deployments/navis-gpt/chat/completions?api-version=2024-12-01-preview',
+  );
+  assert.equal(seen?.headers['api-key'], 'k-123');
+  assert.equal(seen?.body.model, undefined);
+  assert.equal(reply.toolCalls[0]?.function.name, 'a__b');
+});
