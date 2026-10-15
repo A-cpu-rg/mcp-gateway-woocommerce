@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: store-setup
+  labels: {{- include "store.labels" . | nindent 4 }}
+data:
+  bootstrap.sh: |- {{- .Files.Get "files/bootstrap.sh" | nindent 4 }}
+---
+# Converges the store (install, WooCommerce, COD, API key) after every install/upgrade. Idempotent.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: store-setup
+  labels: {{- include "store.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation
+    checksum/script: {{ .Files.Get "files/bootstrap.sh" | sha256sum }}
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels: {{- include "store.labels" . | nindent 8 }}
+        app.kubernetes.io/name: store-setup
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 33          # www-data, owner of the WordPress files
+        runAsGroup: 33
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      # The content volume is ReadWriteOnce: run on the node where WordPress has it mounted.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels: { app.kubernetes.io/name: wordpress }
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: setup
+          image: {{ .Values.wordpress.cliImage }}
+          command: ["sh", "/scripts/bootstrap.sh"]
+          securityContext: {{- include "store.restricted" . | nindent 12 }}
+          env:
+            {{- include "store.wpDbEnv" . | nindent 12 }}
+            - { name: WP_URL, value: "{{ include "store.scheme" . }}://{{ .Values.host }}" }
+            - { name: STORE_TITLE, value: {{ .Values.store.title | quote }} }
+            - { name: STORE_CURRENCY, value: {{ .Values.store.currency | quote }} }
+            - { name: STORE_COUNTRY, value: {{ .Values.store.country | quote }} }
+            - { name: WC_VERSION, value: {{ .Values.store.woocommerceVersion | quote }} }
+            - { name: HOME, value: /tmp }
+            - { name: WP_CLI_CACHE_DIR, value: /tmp/wp-cli-cache }
+          envFrom:
+            - secretRef: { name: {{ .Values.secrets.wpAdmin }} }
+            - secretRef: { name: {{ .Values.secrets.wcApi }} }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          volumeMounts:
+            - { name: content, mountPath: /var/www/html }
+            - { name: scripts, mountPath: /scripts }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: content
+          persistentVolumeClaim: { claimName: wordpress-content }
+        - name: scripts
+          configMap: { name: store-setup }
+        - { name: tmp, emptyDir: {} }

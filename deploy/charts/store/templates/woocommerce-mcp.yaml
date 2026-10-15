@@ -1,0 +1,55 @@
+# ClusterIP only, no Ingress: unreachable from outside the cluster. The NetworkPolicy below restricts
+# in-cluster callers to the gateway pods, and the bearer token is a second, independent barrier.
+apiVersion: v1
+kind: Service
+metadata:
+  name: woocommerce-mcp
+  labels: {{- include "store.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector: { app.kubernetes.io/name: woocommerce-mcp }
+  ports: [{ name: http, port: 8080, targetPort: http }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: woocommerce-mcp
+  labels: {{- include "store.labels" . | nindent 4 }}
+    app.kubernetes.io/name: woocommerce-mcp
+spec:
+  replicas: {{ .Values.woocommerceMcp.replicas }}
+  selector:
+    matchLabels: { app.kubernetes.io/name: woocommerce-mcp }
+  template:
+    metadata:
+      labels: {{- include "store.labels" . | nindent 8 }}
+        app.kubernetes.io/name: woocommerce-mcp
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: woocommerce-mcp
+          image: {{ .Values.woocommerceMcp.image }}
+          imagePullPolicy: {{ .Values.woocommerceMcp.pullPolicy }}
+          securityContext: {{- include "store.restricted" . | nindent 12 }}
+          env:
+            - { name: WC_BASE_URL, value: "http://wordpress.{{ .Release.Namespace }}.svc.cluster.local" }
+            # WooCommerce signs against WordPress's home URL, and the in-cluster hop is plain HTTP.
+            - { name: WC_SIGNING_ORIGIN, value: "http://{{ .Values.host }}" }
+            - { name: WC_TIMEOUT_MS, value: {{ .Values.woocommerceMcp.timeoutMs | quote }} }
+          envFrom:
+            - secretRef: { name: {{ .Values.secrets.wcApi }} }
+            - secretRef: { name: {{ .Values.secrets.mcpAuth }} }
+          ports: [{ name: http, containerPort: 8080 }]
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 9
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 20
+          resources: {{- toYaml .Values.woocommerceMcp.resources | nindent 12 }}

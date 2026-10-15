@@ -1,0 +1,57 @@
+# Defaults shared by every environment. values-local.yaml / values-prod.yaml override per environment.
+
+host: app.localtest.me            # dashboard + /api + /mcp
+ingress:
+  className: traefik
+  tlsSecret: ""
+  annotations: {}
+  controllerNamespace: kube-system
+
+storageClass: ""
+
+# Created by scripts/create-secrets.sh; referenced by name only.
+secrets:
+  gateway: gateway-secrets        # ENCRYPTION_KEY, ADMIN_EMAIL, ADMIN_PASSWORD
+  upstreams: gateway-upstreams    # SEED_SERVERS (first-start registrations incl. upstream credentials)
+  llm: gateway-llm                # LLM_* (optional: chat is disabled without it)
+  postgres: postgres-auth         # POSTGRES_PASSWORD
+  toolbox: toolbox-auth           # TOOLBOX_API_KEY
+
+# Namespaces the gateway may call into (upstream MCP servers). Its egress NetworkPolicy allows only these
+# (port 8080), plus Postgres, DNS and public HTTPS (LLM provider, external MCP servers).
+upstreamNamespaces: [store]
+
+gateway:
+  image: urumi/gateway:dev
+  pullPolicy: IfNotPresent
+  replicas: 2                     # stateless MCP (SDK v2): any replica serves any request
+  # Hosts allowed to resolve to private addresses (SSRF allow-list). Metadata IPs are always blocked.
+  upstreamAllowedHosts: "*.svc.cluster.local"
+  healthIntervalMs: 10000
+  cookieSecure: false
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: "1", memory: 384Mi }
+
+postgres:
+  image: postgres:17.11-alpine
+  storage: 1Gi
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { cpu: 500m, memory: 384Mi }
+
+toolbox:
+  enabled: true
+  image: urumi/toolbox-mcp:dev
+  pullPolicy: IfNotPresent
+  resources:
+    requests: { cpu: 20m, memory: 64Mi }
+    limits: { cpu: 250m, memory: 192Mi }
+
+everything:
+  enabled: true
+  image: urumi/everything-mcp:dev
+  pullPolicy: IfNotPresent
+  resources:
+    requests: { cpu: 20m, memory: 64Mi }
+    limits: { cpu: 250m, memory: 256Mi }

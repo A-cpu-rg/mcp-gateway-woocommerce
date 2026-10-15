@@ -1,0 +1,100 @@
+# Default deny for everything in the store namespace, then only the flows the store needs.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  labels: {{- include "store.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  labels: {{- include "store.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+          podSelector: { matchLabels: { k8s-app: kube-dns } }
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+---
+# MariaDB: only WordPress and the setup Job.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mariadb
+  labels: {{- include "store.labels" . | nindent 4 }}
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/name: mariadb } }
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: wordpress } }
+        - podSelector: { matchLabels: { app.kubernetes.io/name: store-setup } }
+      ports: [{ port: 3306 }]
+---
+# WordPress: public traffic via the ingress controller, and the store's own MCP server.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wordpress
+  labels: {{- include "store.labels" . | nindent 4 }}
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/name: wordpress } }
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: {{ .Values.ingress.controllerNamespace }} } }
+        - podSelector: { matchLabels: { app.kubernetes.io/name: woocommerce-mcp } }
+      ports: [{ port: 80 }]
+  egress:
+    - to: [{ podSelector: { matchLabels: { app.kubernetes.io/name: mariadb } } }]
+      ports: [{ port: 3306 }]
+    # WordPress itself calls out for update checks; public internet only, never cluster or metadata ranges.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10]
+      ports: [{ port: 443 }, { port: 80 }]
+---
+# Setup Job: database + public internet (downloads the pinned WooCommerce release).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: store-setup
+  labels: {{- include "store.labels" . | nindent 4 }}
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/name: store-setup } }
+  policyTypes: ["Egress"]
+  egress:
+    - to: [{ podSelector: { matchLabels: { app.kubernetes.io/name: mariadb } } }]
+      ports: [{ port: 3306 }]
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10]
+      ports: [{ port: 443 }, { port: 80 }]
+---
+# WooCommerce MCP server: callable ONLY by the gateway pods; may only talk to WordPress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: woocommerce-mcp
+  labels: {{- include "store.labels" . | nindent 4 }}
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/name: woocommerce-mcp } }
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ .Values.gateway.namespace }} }
+          podSelector:
+            matchLabels: {{- toYaml .Values.gateway.podLabels | nindent 14 }}
+      ports: [{ port: 8080 }]
+  egress:
+    - to: [{ podSelector: { matchLabels: { app.kubernetes.io/name: wordpress } } }]
+      ports: [{ port: 80 }]

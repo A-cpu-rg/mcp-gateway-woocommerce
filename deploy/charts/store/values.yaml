@@ -1,0 +1,56 @@
+# Defaults shared by every environment. values-local.yaml / values-prod.yaml override per environment.
+
+# Public storefront host. WordPress's home URL becomes <scheme>://<host>.
+host: store.localtest.me
+ingress:
+  className: traefik
+  # TLS secret name (cert-manager fills it in prod); empty = plain HTTP.
+  tlsSecret: ""
+  annotations: {}
+  # Namespace of the ingress controller pods, allowed through the NetworkPolicy to WordPress.
+  controllerNamespace: kube-system
+
+storageClass: ""          # "" = cluster default (local-path on k3s/k3d)
+
+# Secrets are created outside Helm (scripts/create-secrets.sh); the chart only references them.
+secrets:
+  db: store-db                       # MARIADB_ROOT_PASSWORD, MARIADB_PASSWORD
+  wpAdmin: store-wp-admin            # WP_ADMIN_USER, WP_ADMIN_PASSWORD, WP_ADMIN_EMAIL
+  wcApi: store-wc-api                # WC_CONSUMER_KEY, WC_CONSUMER_SECRET
+  mcpAuth: woocommerce-mcp-auth      # MCP_AUTH_TOKEN (the gateway holds the same value)
+
+# Pods allowed to call the WooCommerce MCP server (the gateway). Nothing else can reach it.
+gateway:
+  namespace: platform
+  podLabels:
+    app.kubernetes.io/name: gateway
+
+store:
+  title: Urumi Demo Store
+  currency: USD
+  country: "US:CA"
+  woocommerceVersion: "11.2.1"
+
+mariadb:
+  image: mariadb:11.8.9
+  storage: 2Gi
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: "1", memory: 512Mi }
+
+wordpress:
+  image: wordpress:7.1.3-php8.4-apache
+  cliImage: wordpress:cli-2.12.0-php8.4
+  storage: 2Gi
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: "1", memory: 512Mi }
+
+woocommerceMcp:
+  image: urumi/woocommerce-mcp:dev
+  pullPolicy: IfNotPresent
+  replicas: 1
+  timeoutMs: 8000
+  resources:
+    requests: { cpu: 50m, memory: 96Mi }
+    limits: { cpu: 500m, memory: 256Mi }

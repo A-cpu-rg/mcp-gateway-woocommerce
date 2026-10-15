@@ -1,0 +1,49 @@
+# syntax=docker/dockerfile:1
+# One Dockerfile, one target per image:
+#   docker build --target gateway         --build-arg APP=gateway         -t urumi/gateway:dev .
+#   docker build --target app             --build-arg APP=woocommerce-mcp -t urumi/woocommerce-mcp:dev .
+#   docker build --target app             --build-arg APP=toolbox-mcp     -t urumi/toolbox-mcp:dev .
+#   docker build --target everything-mcp                                  -t urumi/everything-mcp:dev .
+# Services run TypeScript directly with Node's built-in type stripping, so there is no compile step.
+
+FROM node:24.22.0-alpine AS base
+RUN corepack enable && corepack prepare pnpm@10.28.0 --activate
+WORKDIR /repo
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
+COPY apps/gateway/package.json apps/gateway/
+COPY apps/dashboard/package.json apps/dashboard/
+COPY apps/woocommerce-mcp/package.json apps/woocommerce-mcp/
+COPY apps/toolbox-mcp/package.json apps/toolbox-mcp/
+
+FROM base AS dashboard
+RUN pnpm install --frozen-lockfile --filter dashboard
+COPY apps/dashboard apps/dashboard
+RUN pnpm --filter dashboard build
+
+FROM base AS deploy
+ARG APP
+COPY apps/${APP} apps/${APP}
+# Production dependencies of one app only, flattened into /out.
+RUN pnpm --filter "${APP}" deploy --prod --legacy /out && rm -rf /out/test
+
+FROM node:24.22.0-alpine AS app
+ENV NODE_ENV=production PORT=8080
+WORKDIR /app
+COPY --from=deploy /out ./
+USER node
+EXPOSE 8080
+CMD ["node", "src/main.ts"]
+
+FROM app AS gateway
+COPY --from=dashboard /repo/apps/dashboard/dist ./dashboard
+ENV DASHBOARD_DIR=/app/dashboard
+
+# Third-party reference MCP server (upstream #3), pinned. Not our code: treated as untrusted by the gateway.
+FROM node:24.22.0-alpine AS everything-mcp
+ENV NODE_ENV=production PORT=8080
+WORKDIR /app
+RUN npm install --omit=dev --no-audit --no-fund @modelcontextprotocol/server-everything@2026.8.31 \
+  && npm cache clean --force
+USER node
+EXPOSE 8080
+CMD ["node", "node_modules/@modelcontextprotocol/server-everything/dist/index.js", "streamableHttp"]

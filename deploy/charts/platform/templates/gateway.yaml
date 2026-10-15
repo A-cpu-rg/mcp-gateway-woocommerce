@@ -1,0 +1,99 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  labels: {{- include "platform.labels" . | nindent 4 }}
+spec:
+  selector: { app.kubernetes.io/name: gateway }
+  ports: [{ name: http, port: 80, targetPort: http }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  labels: {{- include "platform.labels" . | nindent 4 }}
+    app.kubernetes.io/name: gateway
+spec:
+  replicas: {{ .Values.gateway.replicas }}
+  selector:
+    matchLabels: { app.kubernetes.io/name: gateway }
+  template:
+    metadata:
+      labels: {{- include "platform.labels" . | nindent 8 }}
+        app.kubernetes.io/name: gateway
+    spec:
+      automountServiceAccountToken: false   # the gateway never talks to the Kubernetes API
+      securityContext: {{- include "platform.podSecurity" . | nindent 8 }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: { matchLabels: { app.kubernetes.io/name: gateway } }
+      containers:
+        - name: gateway
+          image: {{ .Values.gateway.image }}
+          imagePullPolicy: {{ .Values.gateway.pullPolicy }}
+          securityContext: {{- include "platform.restricted" . | nindent 12 }}
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ .Values.secrets.postgres }}, key: POSTGRES_PASSWORD } }
+            - { name: DATABASE_URL, value: "postgres://gateway:$(POSTGRES_PASSWORD)@postgres:5432/gateway" }
+            - { name: PUBLIC_URL, value: "{{ if .Values.ingress.tlsSecret }}https{{ else }}http{{ end }}://{{ .Values.host }}" }
+            - { name: COOKIE_SECURE, value: {{ .Values.gateway.cookieSecure | quote }} }
+            - { name: UPSTREAM_ALLOWED_HOSTS, value: {{ .Values.gateway.upstreamAllowedHosts | quote }} }
+            - { name: HEALTH_INTERVAL_MS, value: {{ .Values.gateway.healthIntervalMs | quote }} }
+          envFrom:
+            - secretRef: { name: {{ .Values.secrets.gateway }} }
+            - secretRef: { name: {{ .Values.secrets.upstreams }}, optional: true }
+            - secretRef: { name: {{ .Values.secrets.llm }}, optional: true }
+          ports: [{ name: http, containerPort: 8080 }]
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 3
+            failureThreshold: 40
+          # Readiness = Postgres reachable. Upstream health is NOT part of it: a dead upstream must not
+          # remove the gateway from the Service.
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 20
+          resources: {{- toYaml .Values.gateway.resources | nindent 12 }}
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]
+      volumes: [{ name: tmp, emptyDir: {} }]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: gateway
+  labels: {{- include "platform.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: gateway }
+---
+# Dashboard, REST API and the MCP endpoint share one host (same origin).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gateway
+  labels: {{- include "platform.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tlsSecret }}
+  tls:
+    - hosts: [{{ .Values.host | quote }}]
+      secretName: {{ .Values.ingress.tlsSecret }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: gateway, port: { name: http } }

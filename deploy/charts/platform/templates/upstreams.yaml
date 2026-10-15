@@ -1,0 +1,10 @@
+{{- if .Values.toolbox.enabled }}
+{{ include "platform.mcpServer" (dict "ctx" . "name" "toolbox-mcp" "v" .Values.toolbox
+  "envFrom" (list (dict "secretRef" (dict "name" .Values.secrets.toolbox)))
+  "readiness" (dict "httpGet" (dict "path" "/readyz" "port" "http"))) }}
+{{- end }}
+{{- if .Values.everything.enabled }}
+---
+{{ include "platform.mcpServer" (dict "ctx" . "name" "everything-mcp" "v" .Values.everything
+  "readiness" (dict "tcpSocket" (dict "port" "http"))) }}
+{{- end }}

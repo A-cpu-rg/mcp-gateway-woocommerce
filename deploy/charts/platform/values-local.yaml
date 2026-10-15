@@ -1,0 +1,10 @@
+host: app.localtest.me
+gateway:
+  image: urumi/gateway:dev
+  pullPolicy: Never
+toolbox:
+  image: urumi/toolbox-mcp:dev
+  pullPolicy: Never
+everything:
+  image: urumi/everything-mcp:dev
+  pullPolicy: Never
