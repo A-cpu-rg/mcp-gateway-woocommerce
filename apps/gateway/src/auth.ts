@@ -157,15 +157,32 @@ export async function createInvite(
   }
 }
 
-/** Single use: the UPDATE ... WHERE used_at IS NULL claim makes concurrent accepts safe. */
+/**
+ * Single use: the UPDATE ... WHERE used_at IS NULL claim makes concurrent accepts safe. The claim and the
+ * password write share one transaction, so a failure cannot burn the invite without setting the password.
+ * The token is checked before the (expensive) password hash, so unknown tokens cost one indexed lookup.
+ */
 export async function acceptInvite(db: Db, token: string, password: string): Promise<boolean> {
-  const hash = await hashPassword(password);
-  const { rows } = await db.query<{ user_id: string }>(
-    `UPDATE invites SET used_at = now() WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now()
-     RETURNING user_id`,
-    [sha256(token)],
-  );
-  if (!rows[0]) return false;
-  await db.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, rows[0].user_id]);
-  return true;
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query<{ user_id: string }>(
+      `UPDATE invites SET used_at = now() WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now()
+       RETURNING user_id`,
+      [sha256(token)],
+    );
+    if (!rows[0]) {
+      await client.query('ROLLBACK');
+      return false;
+    }
+    const hash = await hashPassword(password);
+    await client.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, rows[0].user_id]);
+    await client.query('COMMIT');
+    return true;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }

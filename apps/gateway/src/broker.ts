@@ -4,6 +4,8 @@ import { type CallOutcome, slugOf, type UpstreamPool, type UpstreamTool } from '
 
 export type Channel = 'mcp' | 'chat';
 
+const COLD_LIST_WAIT_MS = 1500;
+
 export interface AuditEntry {
   principal: Principal;
   channel: Channel;
@@ -65,6 +67,19 @@ export class Broker {
   /** Tools this principal may call: enabled, connected servers only; admin-only tools hidden from members. */
   async listTools(p: Principal): Promise<(UpstreamTool & { server: string })[]> {
     const rows = await this.#pool.servers();
+    // A server added or edited through another replica is not in this replica's cache yet. Fetch it now,
+    // but wait only briefly, so a slow upstream still cannot hold up the listing (its check carries on).
+    const cold = rows.filter((r) => r.enabled && r.status !== 'unreachable' && this.#pool.isCold(r));
+    if (cold.length) {
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([
+        Promise.allSettled(cold.map((r) => this.#pool.check(r))),
+        new Promise((resolve) => {
+          timer = setTimeout(resolve, COLD_LIST_WAIT_MS);
+        }),
+      ]);
+      clearTimeout(timer);
+    }
     return rows
       .filter((r) => r.enabled)
       .flatMap((r) =>

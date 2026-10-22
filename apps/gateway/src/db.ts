@@ -4,7 +4,33 @@ import pg from 'pg';
 export type Db = pg.Pool;
 
 export function createDb(connectionString: string, options?: string): Db {
-  return new pg.Pool({ connectionString, max: 10, options, connectionTimeoutMillis: 5000 });
+  const pool = new pg.Pool({
+    connectionString,
+    max: 10,
+    options,
+    connectionTimeoutMillis: 5000,
+    keepAlive: true,
+  });
+  // A Postgres restart or failover kills idle pooled connections; pg reports that as an 'error' event on
+  // the pool, which crashes the process if nobody listens. Log it and let the pool open fresh connections.
+  pool.on('error', (err) =>
+    console.error(JSON.stringify({ msg: 'idle database connection lost', error: String(err) })),
+  );
+  return pool;
+}
+
+/** Waits for Postgres to accept connections (it usually starts alongside the gateway on `helm install`). */
+export async function waitForDb(db: Db, attempts = 60, delayMs = 2000): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await db.query('SELECT 1');
+      return;
+    } catch (err) {
+      if (attempt >= attempts) throw new Error(`database unavailable after ${attempts} attempts: ${err}`);
+      console.error(JSON.stringify({ msg: 'waiting for database', attempt, error: String(err) }));
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
 }
 
 const MIGRATIONS_DIR = new URL('./migrations/', import.meta.url);

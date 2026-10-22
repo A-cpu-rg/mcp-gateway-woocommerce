@@ -96,6 +96,8 @@ interface Entry {
   version: number;
   client?: Promise<Client>;
   tools: UpstreamTool[];
+  /** True once this replica has listed the tools of this version of the server. */
+  listed: boolean;
   inFlight: number;
 }
 
@@ -128,8 +130,20 @@ export class UpstreamPool {
 
   /** Cached tools of a server; empty until the first successful health check. */
   tools(row: ServerRow): UpstreamTool[] {
+    // Status lives in Postgres and is shared by every replica. When any replica has seen the server die,
+    // the others must stop listing their cached tools too, not only after their own next health check.
+    if (row.status === 'unreachable') return [];
     const e = this.#entries.get(row.id);
     return e && e.version === row.updated_at.getTime() ? e.tools : [];
+  }
+
+  /**
+   * True when this replica has no tool list for the server's current configuration yet: the server was just
+   * added or edited, possibly through another replica, and this replica's health check has not run since.
+   */
+  isCold(row: ServerRow): boolean {
+    const e = this.#entries.get(row.id);
+    return !e?.listed || e.version !== row.updated_at.getTime();
   }
 
   #entry(row: ServerRow): Entry {
@@ -137,7 +151,7 @@ export class UpstreamPool {
     if (!e || e.version !== row.updated_at.getTime()) {
       // Config changed (URL, credential, ...): discard the old connection and its tools.
       if (e) this.#closeClient(e);
-      e = { version: row.updated_at.getTime(), tools: [], inFlight: 0 };
+      e = { version: row.updated_at.getTime(), tools: [], listed: false, inFlight: 0 };
       this.#entries.set(row.id, e);
     }
     return e;
@@ -152,7 +166,16 @@ export class UpstreamPool {
   #connect(row: ServerRow, e: Entry): Promise<Client> {
     if (!e.client) {
       const headers: Record<string, string> = {};
-      const credential = row.credential_enc ? decrypt(this.#key, row.credential_enc) : '';
+      let credential = '';
+      if (row.credential_enc) {
+        try {
+          credential = decrypt(this.#key, row.credential_enc);
+        } catch {
+          throw new Error(
+            `cannot decrypt the stored credential for '${row.slug}': ENCRYPTION_KEY differs from the one it was saved with. Restore the key or re-enter the credential.`,
+          );
+        }
+      }
       if (row.auth_type === 'bearer') headers.authorization = `Bearer ${credential}`;
       if (row.auth_type === 'header' && row.auth_header) headers[row.auth_header] = credential;
       const client = new Client(
@@ -208,6 +231,7 @@ export class UpstreamPool {
         cursor = page.nextCursor;
       } while (cursor && tools.length < 500);
       e.tools = tools;
+      e.listed = true;
       await this.#setStatus(row, 'connected', null);
     } catch (err) {
       this.#closeClient(e);

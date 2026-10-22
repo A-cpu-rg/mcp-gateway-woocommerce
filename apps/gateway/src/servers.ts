@@ -130,10 +130,14 @@ export async function seedServers(d: ServerDeps, json: string): Promise<string[]
     const exists = await d.db.query('SELECT 1 FROM upstream_servers WHERE slug = $1', [s.slug]);
     if (exists.rowCount) continue;
     // Seed URLs come from the operator, not the dashboard, but they pass the same URL policy.
-    await createServer(d, s).catch((err) => {
+    try {
+      await createServer(d, s);
+      created.push(s.slug);
+    } catch (err) {
+      // Another replica starting at the same time inserted this slug first: nothing left to do.
+      if ((err as { code?: string }).code === '23505') continue;
       throw new Error(`seed server ${s.slug}: ${(err as Error).message}`);
-    });
-    created.push(s.slug);
+    }
   }
   return created;
 }

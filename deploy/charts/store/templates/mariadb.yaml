@@ -46,13 +46,16 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
+          # First initialisation and InnoDB crash recovery can take minutes; liveness only starts after this.
+          startupProbe:
+            exec: { command: ["healthcheck.sh", "--connect", "--innodb_initialized"] }
+            periodSeconds: 5
+            failureThreshold: 120
           readinessProbe:
             exec: { command: ["healthcheck.sh", "--connect", "--innodb_initialized"] }
-            initialDelaySeconds: 10
             periodSeconds: 10
           livenessProbe:
             exec: { command: ["healthcheck.sh", "--connect"] }
-            initialDelaySeconds: 60
             periodSeconds: 20
             failureThreshold: 3
           resources: {{- toYaml .Values.mariadb.resources | nindent 12 }}

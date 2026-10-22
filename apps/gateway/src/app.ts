@@ -6,7 +6,7 @@ import { createApi } from './api.ts';
 import { ensureAdmin } from './auth.ts';
 import { Broker } from './broker.ts';
 import type { Config } from './config.ts';
-import { createDb, migrate } from './db.ts';
+import { createDb, migrate, waitForDb } from './db.ts';
 import { createMcpEndpoint } from './mcp.ts';
 import { seedServers } from './servers.ts';
 import { UpstreamPool } from './upstreams.ts';
@@ -26,6 +26,7 @@ export async function createGateway(
   opts: { model?: ChatModel; dbOptions?: string; startHealth?: boolean } = {},
 ) {
   const db = createDb(cfg.databaseUrl, opts.dbOptions);
+  await waitForDb(db);
   await migrate(db);
   if (cfg.bootstrapAdmin) await ensureAdmin(db, cfg.bootstrapAdmin.email, cfg.bootstrapAdmin.password);
 
