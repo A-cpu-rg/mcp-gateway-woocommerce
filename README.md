@@ -30,7 +30,7 @@ permissions and an audit log of every call.
 
 ## Local setup (k3d)
 
-Requirements: Docker, [k3d](https://k3d.io) ≥ 5.6, kubectl, Helm 3, Node ≥ 22.18, pnpm 10, openssl.
+Requirements: Docker, [k3d](https://k3d.io) ≥ 5.6, kubectl, Helm 3, Node ≥ 22.19 (24 recommended; see `.node-version`), pnpm 10, openssl.
 
 ```bash
 pnpm install
@@ -92,6 +92,8 @@ delivery**, **Place order**. The order appears in WooCommerce admin → Orders.
 - Admin: **Team → Invite** creates a one-time link (72 h). The member opens it and sets a password.
 - Anyone: **Keys → Generate key**. The key is shown once, with ready-made client config. Keys are stored as
   SHA-256 hashes; **Revoke** takes effect on the next request.
+- Admin: **Keys → For: <member> → Generate key** issues a key on a member's behalf. It belongs to that member
+  (their role, their audit entries), and admins can see and revoke every key with **Show all team keys**.
 
 ### Connect an external MCP client
 Only the gateway URL and your own key are needed; upstream servers and their credentials are never exposed.
@@ -135,6 +137,28 @@ The WooCommerce server is pre-registered on first start.
 | Definition of done, two users, incl. revoke / disable / dead upstream | `make e2e` | running cluster |
 
 CI (`.github/workflows/ci.yml`) runs the first three on every push.
+
+## Verification status
+
+Verified on local k3d (k3s v1.33.5, Helm 3.17.3, Docker Desktop with 4 GB RAM), 2026-10-22:
+
+| Check | How | Result |
+|---|---|---|
+| `make up`: images, secrets, both releases, setup Job | `make images import secrets deploy-local` | All pods Ready, 3 PVCs Bound, 2 Ingresses, 11 NetworkPolicies |
+| Definition-of-done script, two users | `make e2e` (dead upstream via `kubectl delete pod`) | 18/18, twice in a row |
+| Storefront checkout (COD) and WooCommerce admin | Store API cart + checkout; wp-admin → Orders | Order created (`processing`) and listed in admin |
+| Chat agent with Azure OpenAI as user A | "Create a product …", then "What orders came in today?" | `create_product` → product page live; `list_orders` returns the order |
+| External MCP client as user B | MCP Inspector CLI 0.17.2, gateway URL + B's key only | Tools of all 3 servers, no admin-only tools; orders today; a second server's tool |
+| Revoke / disable | Revoke B's key; disable `toolbox` | Next call 401; tools gone from client and chat |
+| Audit attribution | Dashboard → Audit | Chat calls under A (`chat`), MCP calls and rejected attempt under B |
+| Persistence | Delete `mariadb-0`, `wordpress`, `postgres-0` pods | Products, order, users and keys intact; gateway pods did not restart |
+| NetworkPolicies | Probe pods + `exec` from real pods | Only the gateway reaches `woocommerce-mcp`; upstreams have no egress; control request succeeds |
+| Helm upgrade and rollback | `helm upgrade … --set …`, `helm rollback platform 1` | Value applied, then restored; data and servers intact |
+| Gateway requirements, live | Add/edit/disable/remove a server (header and bearer credentials), `echo` on two servers, a 2 s timeout on a slow tool, credential leak scan of API/MCP/dashboard bundle, member 403s, audit fields | All pass; new servers are listed by both replicas immediately |
+| Workloads and Secrets, live | Live Deployments/StatefulSets; live pod env; `pg_dump` of the gateway DB | Probes and requests/limits on every workload; credentials only via Secrets; no raw API key or upstream credential in Postgres |
+
+Not yet verified: a VPS / k3s deployment with TLS (`values-prod.yaml`), and Claude Code or Cursor as the
+client (MCP Inspector was used). Re-run `make up && make e2e` before recording the video.
 
 ## Stand-out items attempted
 

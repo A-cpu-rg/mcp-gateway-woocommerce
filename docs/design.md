@@ -79,11 +79,48 @@ audit are identical; the model is only offered tools that user may call.
 
 ## Persistence
 
-- Store: MariaDB on a PVC (`volumeClaimTemplates`) and WordPress `wp-content` on a PVC with
-  `helm.sh/resource-policy: keep` (survives `helm uninstall`).
-- Gateway: Postgres on a PVC. Migrations are forward-only SQL files applied at startup inside a transaction,
-  under `pg_advisory_lock`, so two replicas starting together cannot race. Forward-only + additive changes keep
-  `helm rollback` of the gateway safe (old code ignores new columns).
+| Data | Where | Survives |
+|---|---|---|
+| Store database (products, orders) | MariaDB StatefulSet, PVC `data-mariadb-0` (`volumeClaimTemplates`) | Pod restart, `helm upgrade`, `helm uninstall` (StatefulSet PVCs are never deleted by Helm) |
+| WordPress content (uploads, plugins, `wp-config.php`) | PVC `wordpress-content`, `helm.sh/resource-policy: keep` | Same |
+| Gateway data (users, key hashes, encrypted upstream credentials, audit log) | Postgres StatefulSet, PVC `data-postgres-0` | Same |
+
+- Both databases are single-replica on one `ReadWriteOnce` volume. A pod restart reattaches the same volume
+  and the database recovers from its log (the DB probes have a startup probe of up to 10 minutes so crash
+  recovery is not killed). **Not guaranteed:** node or disk loss. `local-path` volumes live on the node's
+  disk; use a replicated storage class or back up (below) if that matters.
+- Database passwords are read only when a database is first initialised (`MARIADB_*`, `POSTGRES_PASSWORD`).
+  `scripts/create-secrets.sh` never overwrites a Secret, so re-running it cannot lock the app out of its own
+  data; rotating those passwords later needs `ALTER USER` as well as the Secret.
+- `ENCRYPTION_KEY` lives only in the `gateway-secrets` Secret, never in the database. Losing it makes stored
+  upstream credentials unreadable; the dashboard then shows *"ENCRYPTION_KEY differs from the one it was saved
+  with"* for those servers. Back it up with the other Secrets.
+- `storageClass` and volume size are fixed once a StatefulSet exists (Kubernetes forbids editing
+  `volumeClaimTemplates`); choose them before the first install in a new environment.
+- Postgres major versions are not interchangeable on an existing volume: `pg_dump` / restore to upgrade.
+- Gateway: migrations are forward-only SQL files applied at startup inside a transaction, under
+  `pg_advisory_lock`, so replicas starting together cannot race. At startup the gateway waits (up to 2 minutes)
+  for Postgres, and a dropped connection (Postgres restart) is logged and re-established instead of crashing.
+  Forward-only + additive changes keep `helm rollback` of the gateway safe (old code ignores new columns).
+- Readiness of the gateway depends on Postgres only. The WooCommerce MCP pod is ready when it is alive: the
+  store is installed by a post-install Job, and Helm starts post-install hooks only after `--wait` sees every
+  workload Ready, so a readiness probe that needed the store would deadlock the first install.
+
+Backups (not automated; run before upgrades):
+
+```bash
+kubectl -n store exec mariadb-0 -- sh -c 'mariadb-dump -uroot -p"$MARIADB_ROOT_PASSWORD" --single-transaction wordpress' > store.sql
+kubectl -n platform exec postgres-0 -- pg_dump -U gateway gateway > gateway.sql
+```
+
+Check persistence on a cluster (not run in this repository's environment, which has no Docker/Kubernetes):
+
+```bash
+kubectl -n store exec mariadb-0 -- sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" wordpress -e "select count(*) from wp_posts"'
+kubectl -n store delete pod mariadb-0 && kubectl -n store wait --for=condition=Ready pod/mariadb-0 --timeout=5m
+# run the same count again: it must be unchanged; also open the storefront and the orders list
+kubectl -n platform delete pod postgres-0 && kubectl -n platform rollout status deploy/gateway   # keys, servers, audit still there
+```
 
 ## Architecture decisions
 
