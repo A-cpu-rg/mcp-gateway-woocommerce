@@ -219,8 +219,21 @@ export function createApi(d: ApiDeps): Hono<Env> {
     return c.json(rows);
   });
   api.post('/keys', async (c) => {
-    const { name } = await body(c, z.object({ name: z.string().trim().min(1).max(80) }));
-    const key = await createApiKey(d.db, c.get('principal').userId, name);
+    const p = c.get('principal');
+    const { name, userId } = await body(
+      c,
+      z.object({ name: z.string().trim().min(1).max(80), userId: z.uuid().optional() }),
+    );
+    // Admins may issue a key on behalf of a team member; the key belongs to (and is audited as) that member.
+    const owner = userId ?? p.userId;
+    if (owner !== p.userId) {
+      requireAdmin(c);
+      const { rowCount } = await d.db.query('SELECT 1 FROM users WHERE id = $1 AND disabled_at IS NULL', [
+        owner,
+      ]);
+      if (!rowCount) throw new HttpError(404, 'not_found', 'user not found or disabled');
+    }
+    const key = await createApiKey(d.db, owner, name);
     return c.json({ ...key, mcpUrl: d.mcpUrl }, 201); // the token is shown exactly once
   });
   api.delete('/keys/:id', async (c) => {

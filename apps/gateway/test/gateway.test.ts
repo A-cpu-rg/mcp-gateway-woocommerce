@@ -165,6 +165,52 @@ describe('gateway', { skip }, () => {
     await client.close();
   });
 
+  test('admin issues a key for a member: it acts and is audited as the member; members cannot', async () => {
+    const users = (await gw.request('/api/users', { cookie: adminCookie })).json as {
+      id: string;
+      email: string;
+    }[];
+    const bob = users.find((u) => u.email === 'bob@example.com');
+    const adminId = users.find((u) => u.email === ADMIN.email)?.id;
+    assert.ok(bob && adminId);
+
+    const issued = await gw.request('/api/keys', {
+      method: 'POST',
+      cookie: adminCookie,
+      body: JSON.stringify({ name: 'issued by admin', userId: bob.id }),
+    });
+    assert.equal(issued.status, 201, issued.text);
+    const client = await gw.mcpClient(issued.json.token);
+    const names = (await client.listTools()).tools.map((t) => t.name);
+    assert.ok(!names.includes('shop__create_product'), 'issued key has member permissions, not admin');
+    await client.callTool({ name: 'util__echo', arguments: { message: 'hi' } });
+    await client.close();
+    const audit = (await gw.request('/api/audit?limit=5', { cookie: adminCookie })).json as {
+      user: string;
+      apiKeyId: string;
+    }[];
+    assert.ok(audit.some((r) => r.apiKeyId === issued.json.id && r.user === 'bob@example.com'));
+
+    const bobKeys = (await gw.request('/api/keys', { cookie: memberCookie })).json as { id: string }[];
+    assert.ok(
+      bobKeys.some((k) => k.id === issued.json.id),
+      'member sees and can revoke the issued key',
+    );
+
+    const forbidden = await gw.request('/api/keys', {
+      method: 'POST',
+      cookie: memberCookie,
+      body: JSON.stringify({ name: 'x', userId: adminId }),
+    });
+    assert.equal(forbidden.status, 403, 'member cannot issue keys for someone else');
+    const unknown = await gw.request('/api/keys', {
+      method: 'POST',
+      cookie: adminCookie,
+      body: JSON.stringify({ name: 'x', userId: '00000000-0000-4000-8000-000000000000' }),
+    });
+    assert.equal(unknown.status, 404);
+  });
+
   test('member cannot manage servers or invite users', async () => {
     const r1 = await gw.request('/api/servers', {
       method: 'POST',

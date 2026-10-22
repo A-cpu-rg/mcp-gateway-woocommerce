@@ -10,11 +10,27 @@ interface Key {
   userEmail: string;
 }
 
+interface TeamUser {
+  id: string;
+  email: string;
+  disabledAt: string | null;
+}
+
 export function Keys({ me }: { me: Me }) {
   const [keys, setKeys] = useState<Key[]>([]);
   const [all, setAll] = useState(false);
-  const [created, setCreated] = useState<{ token: string; mcpUrl: string } | null>(null);
+  const [created, setCreated] = useState<{ token: string; mcpUrl: string; owner: string } | null>(null);
+  const [users, setUsers] = useState<TeamUser[]>([]);
   const [error, setError] = useState('');
+  const isAdmin = me.role === 'admin';
+
+  // Admins can issue a key for a team member (the key acts and is audited as that member).
+  useEffect(() => {
+    if (!isAdmin) return;
+    api<TeamUser[]>('/users')
+      .then((list) => setUsers(list.filter((u) => !u.disabledAt)))
+      .catch((e) => setError(e.message));
+  }, [isAdmin]);
 
   const load = useCallback(() => {
     api<Key[]>(`/keys${all ? '?all=1' : ''}`)
@@ -26,8 +42,14 @@ export function Keys({ me }: { me: Me }) {
   async function create(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const form = e.currentTarget;
+    const f = new FormData(form);
+    const userId = String(f.get('userId') ?? '') || undefined;
     try {
-      setCreated(await api('/keys', 'POST', { name: new FormData(form).get('name') }));
+      const key = await api<{ token: string; mcpUrl: string }>('/keys', 'POST', {
+        name: f.get('name'),
+        userId,
+      });
+      setCreated({ ...key, owner: users.find((u) => u.id === userId)?.email ?? me.email });
       form.reset();
       load();
     } catch (err) {
@@ -54,12 +76,33 @@ export function Keys({ me }: { me: Me }) {
       </p>
       <form className="row" onSubmit={create}>
         <input name="name" placeholder="Key name, e.g. laptop" required maxLength={80} />
+        {isAdmin && users.length > 0 && (
+          <label className="inline">
+            For{' '}
+            <select name="userId" defaultValue="">
+              <option value="">me ({me.email})</option>
+              {users
+                .filter((u) => u.email !== me.email)
+                .map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {u.email}
+                  </option>
+                ))}
+            </select>
+          </label>
+        )}
         <button type="submit">Generate key</button>
       </form>
       {created && (
         <div className="card highlight">
           <p>
             <strong>Copy this key now — it will not be shown again.</strong>
+            {created.owner !== me.email && (
+              <>
+                {' '}
+                It belongs to <strong>{created.owner}</strong>: hand it over privately (not in a shared chat).
+              </>
+            )}
           </p>
           <pre>{created.token}</pre>
           <p>Claude Code:</p>
@@ -85,7 +128,7 @@ export function Keys({ me }: { me: Me }) {
         </div>
       )}
       {error && <p className="error">{error}</p>}
-      {me.role === 'admin' && (
+      {isAdmin && (
         <label className="inline">
           <input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /> Show all team
           keys
