@@ -25,7 +25,8 @@ const mcp = createMcpHandler(() => createWooMcpServer(wc));
 const app = new Hono();
 
 app.get('/healthz', (c) => c.text('ok'));
-// Ready only if the store answers; the gateway then reports this server as unreachable instead of timing out.
+// Diagnostic: 200 only if the store answers. Deliberately NOT the Kubernetes readiness probe (the chart uses
+// /healthz): the store is installed by a post-install Job that Helm starts only after `--wait` sees this pod Ready.
 app.get('/readyz', async (c) => {
   try {
     await wc.get('/products', { per_page: 1, _fields: 'id' });

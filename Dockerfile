@@ -43,7 +43,11 @@ FROM node:24.22.0-alpine AS everything-mcp
 ENV NODE_ENV=production PORT=8080
 WORKDIR /app
 RUN npm install --omit=dev --no-audit --no-fund @modelcontextprotocol/server-everything@2026.8.31 \
-  && npm cache clean --force
+  && npm cache clean --force && apk add --no-cache tini
+# The server installs no SIGTERM handler, and as PID 1 Node then ignores SIGTERM: a pod delete would hang for
+# the whole grace period while the gateway still sees it as healthy. tini forwards the signal.
+ENTRYPOINT ["/sbin/tini", "--"]
 USER node
 EXPOSE 8080
 CMD ["node", "node_modules/@modelcontextprotocol/server-everything/dist/index.js", "streamableHttp"]
+

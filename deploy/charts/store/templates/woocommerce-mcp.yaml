@@ -45,10 +45,12 @@ spec:
             - secretRef: { name: {{ .Values.secrets.wcApi }} }
             - secretRef: { name: {{ .Values.secrets.mcpAuth }} }
           ports: [{ name: http, containerPort: 8080 }]
+          # Not /readyz: that checks the store's REST API, and WooCommerce is installed by the post-install
+          # setup Job, which Helm only starts after `--wait` sees every workload Ready. Probing the store
+          # here would deadlock the first install. A store outage shows up as clear tool errors instead.
           readinessProbe:
-            httpGet: { path: /readyz, port: http }
+            httpGet: { path: /healthz, port: http }
             periodSeconds: 10
-            timeoutSeconds: 9
           livenessProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 20
