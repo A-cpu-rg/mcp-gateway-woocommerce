@@ -11,6 +11,15 @@ test('url guard: metadata and link-local are blocked even for allow-listed hosts
   assert.throws(() => checkAddress('x.svc.cluster.local', '169.254.169.254', CLUSTER));
   assert.throws(() => checkAddress('x.svc.cluster.local', '::ffff:169.254.169.254', CLUSTER));
   assert.throws(() => checkAddress('x.svc.cluster.local', 'fe80::1', CLUSTER));
+  // Spellings the URL parser actually produces: ::ffff:169.254.169.254 becomes ::ffff:a9fe:a9fe.
+  for (const ip of ['::ffff:a9fe:a9fe', '::a9fe:a9fe', '64:ff9b::a9fe:a9fe', '0:0:0:0:0:ffff:a9fe:a9fe'])
+    assert.throws(() => checkAddress('x.svc.cluster.local', ip, CLUSTER), /never allowed/, ip);
+  // IPv6 loopback is an internal address like 127.0.0.1, not an embedded IPv4 one.
+  assert.throws(() => checkAddress('evil.example.com', '::1', CLUSTER), /not on the allow-list/);
+  assert.doesNotThrow(() => checkAddress('woo.store.svc.cluster.local', '::1', CLUSTER));
+  assert.throws(() => checkAddress('evil.example.com', '::ffff:7f00:1', CLUSTER), /internal/);
+  assert.throws(() => checkAddress('evil.example.com', '::ffff:a00:1', CLUSTER), /internal/);
+  assert.doesNotThrow(() => checkAddress('mcp.example.com', '::ffff:5db8:d822', CLUSTER)); // 93.184.216.34
   assert.throws(() => checkAddress('x.svc.cluster.local', '0.0.0.0', CLUSTER));
 });
 
@@ -22,6 +31,17 @@ test('url guard: private ranges only for allow-listed hosts; public addresses al
   assert.doesNotThrow(() => checkAddress('mcp.example.com', '93.184.216.34', CLUSTER));
   assert.equal(hostAllowed('a.svc.cluster.local.', CLUSTER), true);
   assert.equal(hostAllowed('svc.cluster.local.evil.com', CLUSTER), false);
+});
+
+test('url guard: registration rejects IPv4-in-IPv6 URL literals that reach metadata or internal hosts', async () => {
+  for (const url of [
+    'http://[::ffff:169.254.169.254]/mcp',
+    'http://[::ffff:a9fe:a9fe]/mcp',
+    'http://[64:ff9b::a9fe:a9fe]/mcp',
+    'http://[::ffff:127.0.0.1]/mcp',
+    'http://[::ffff:10.0.0.1]/mcp',
+  ])
+    await assert.rejects(validateUpstreamUrl(url, CLUSTER), url);
 });
 
 test('url guard: registration resolves names and checks every address', async () => {

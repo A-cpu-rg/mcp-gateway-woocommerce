@@ -45,12 +45,47 @@ export function hostAllowed(host: string, patterns: string[]): boolean {
   });
 }
 
+/** Expands an IPv6 literal into its eight 16-bit groups, or null if it is not valid IPv6. */
+function ipv6Groups(ip: string): number[] | null {
+  if (isIP(ip) !== 6) return null;
+  let text = ip.toLowerCase();
+  const dotted = /^(.*:)(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(text);
+  if (dotted) {
+    const [, prefix = '', ...o] = dotted;
+    const [a = 0, b = 0, c = 0, d = 0] = o.map(Number);
+    text = `${prefix}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const [head = '', tail] = text.split('::');
+  const left = head ? head.split(':') : [];
+  const right = tail ? tail.split(':') : [];
+  const fill = tail === undefined ? [] : Array(8 - left.length - right.length).fill('0');
+  return [...left, ...fill, ...right].map((g) => Number.parseInt(g, 16));
+}
+
+/**
+ * IPv4 address embedded in an IPv6 one: IPv4-mapped (::ffff:a.b.c.d), IPv4-compatible (::a.b.c.d) and
+ * NAT64 (64:ff9b::/96). The URL parser rewrites ::ffff:169.254.169.254 to ::ffff:a9fe:a9fe, so checking
+ * only the dotted spelling would let the metadata address through.
+ */
+function embeddedIPv4(ip: string): string | null {
+  const g = ipv6Groups(ip);
+  if (!g) return null;
+  const [g0 = 0, g1 = 0, , , , g5 = 0, g6 = 0, g7 = 0] = g;
+  const zeros = (n: number) => g.slice(0, n).every((x) => x === 0);
+  const mapped = zeros(5) && g5 === 0xffff;
+  const compatible = zeros(6) && (g6 !== 0 || g7 > 1); // not :: (unspecified) or ::1 (loopback)
+  const nat64 = g0 === 0x64 && g1 === 0xff9b && g.slice(2, 6).every((x) => x === 0);
+  if (!mapped && !compatible && !nat64) return null;
+  return `${g6 >> 8}.${g6 & 255}.${g7 >> 8}.${g7 & 255}`;
+}
+
 /** Throws UrlPolicyError if `ip` must not be dialled for `host`. */
 export function checkAddress(host: string, ip: string, allowedHosts: string[]): void {
-  const mapped = ip.toLowerCase().startsWith('::ffff:') ? ip.slice(7) : ip;
-  const fam = family(mapped);
-  if (ALWAYS_BLOCKED.check(mapped, fam)) throw new UrlPolicyError(`address ${ip} is never allowed`);
-  if (INTERNAL.check(mapped, fam) && !hostAllowed(host, allowedHosts)) {
+  const embedded = embeddedIPv4(ip);
+  if (embedded) checkAddress(host, embedded, allowedHosts);
+  const fam = family(ip);
+  if (ALWAYS_BLOCKED.check(ip, fam)) throw new UrlPolicyError(`address ${ip} is never allowed`);
+  if (INTERNAL.check(ip, fam) && !hostAllowed(host, allowedHosts)) {
     throw new UrlPolicyError(`host ${host} resolves to internal address ${ip} and is not on the allow-list`);
   }
 }
