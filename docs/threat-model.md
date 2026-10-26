@@ -27,7 +27,11 @@ can do. That is why:
   that is not linked to a store, such as the first store's, grants members nothing beyond ordinary tools.
 - Every call is audited with the real user, so actions done with a shared credential remain attributable.
   The audit row is written before the call reaches the upstream, and a call that cannot be recorded is not
-  made, so a database problem cannot produce an unaudited write. Failed calls keep the tool's error text
+  made, so a database problem cannot produce an unaudited write. Rejected attempts (denied, unknown tool,
+  disabled server, revoked or unknown key) are audited best effort: they are refused either way and never
+  reach an upstream, and a row that cannot be written is reported in the gateway log (`audit write
+  failed`), not dropped silently. The guarantee is also stored as a comment on the `audit_log` table
+  (migration 004). Failed calls keep the tool's error text
   (truncated, bearer tokens redacted); arguments and results are never stored.
 - The upstream sees only "the gateway". It cannot tell members apart, so per-user limits must live in the gateway.
 - Residual risk: whatever a read tool exposes (e.g. customer names and emails in orders) is visible to every
@@ -80,17 +84,40 @@ and results reach the model and the team's MCP clients. What it can try, and wha
 - The gateway, which faces the internet and runs the chat agent, holds no Kubernetes credentials. A
   compromised gateway can request stores (bounded by the per-user limit) but cannot create or delete
   arbitrary cluster objects.
-- Store-provisioner RBAC is least privilege. Cluster-wide it may only manage namespaces and create
-  RoleBindings that grant one role, `<release ns>-store-tenant`; it binds that role to itself in each
-  `store-<slug>` namespace it creates (and, for older stores, before teardown). It holds no rights in
-  `platform`, `kube-system` or any other namespace: no Secrets, no workloads. RBAC cannot restrict names by
-  prefix, so a ValidatingAdmissionPolicy (`provisioner.admissionPolicy`, Kubernetes >= 1.30) limits its
-  namespace and RoleBinding writes to `store-*`, to the tenant role, and to itself as the subject. The
-  remaining cluster-wide power is deleting `store-*` namespaces; the code additionally checks the store-id
-  label before deleting one. The previous chart version gave it a cluster-wide role over Secrets and
-  workloads, which on k3s amounted to cluster-admin (a Deployment in `kube-system` can run as
-  `helm-traefik`); a cluster installed from that version keeps those rights until the chart is upgraded
-  (see the migration in [design.md](design.md#provisioner-rbac-migration)).
+- **The store-provisioner is a trusted tenant control plane.** One long-lived identity installs and removes
+  every store, so it necessarily has authority over every store namespace. Stores are isolated from each
+  other (NetworkPolicies, separate Secrets and databases); they are **not** isolated from the provisioner.
+  What it can and cannot do, and how that is enforced:
+  - Outside store namespaces: nothing. Cluster-wide it may only manage namespaces and create RoleBindings
+    that grant one role, `<release ns>-store-tenant`, to itself; no rights in `platform`, `kube-system` or
+    elsewhere. A ValidatingAdmissionPolicy (`provisioner.admissionPolicy`, Kubernetes >= 1.30) limits those
+    writes to `store-*` namespaces, to the tenant role and to itself as the subject; RBAC alone cannot
+    restrict by name.
+  - Inside each store namespace (tenant role, bound per namespace): the kinds the store chart creates.
+    Helm keeps release records in ConfigMaps (`HELM_DRIVER=configmap`), so for Secrets it holds only
+    `create` and `get` on `woocommerce-mcp-auth` (the token it registers the store with); it cannot list,
+    read, update or delete `store-db`, `store-wp-admin` or `store-wc-api`, and never requests them.
+  - Namespace deletion: only `store-*` namespaces that carry a `urumi.io/store-id` label (created as a
+    store); the code also checks that the id matches the store row before deleting.
+  - It refuses to start when it holds rights it must not have (Secrets in `platform`, Secrets cluster-wide,
+    Deployments/Pods in `kube-system`, ClusterRole updates), so an image upgraded without the chart, or
+    widened RBAC, stops it with a clear log line instead of operating with them. An existing RoleBinding
+    named `store-provisioner` is verified (role and subject exactly), never trusted by name.
+  - **Residual risk, accepted:** with its token, an attacker can still (a) create a Pod in any store
+    namespace that mounts that store's Secrets (creating workloads implies reading the Secrets they can
+    mount; RBAC cannot separate the two), (b) change any store's workloads, Ingress and NetworkPolicies, and
+    (c) delete any store's namespace (RBAC and CEL cannot tie a delete to the one store row being
+    reconciled). The provisioner also holds `ENCRYPTION_KEY` and Postgres access, so it can decrypt every
+    upstream credential in the gateway database. Mitigations: no inbound network access at all, egress only to
+    Postgres and the API server, no public dependency on its input other than validated store rows, short
+    rotating ServiceAccount tokens. Real per-store isolation from the provisioner needs a different
+    architecture: either a separate authority that verifies gateway-signed intents (an admission webhook
+    allowing a namespace delete or RoleBinding only for a signed request for that store), or delegating
+    installs to a trusted Helm controller (Flux, k3s helm-controller) so the provisioner holds no workload or
+    Secret rights. Neither is implemented.
+  - Clusters installed from an older chart (a cluster-wide role over Secrets and workloads, which on k3s
+    amounted to cluster-admin) keep those rights until the chart is upgraded; the new provisioner then
+    refuses to start until it is (migration in [design.md](design.md#provisioner-rbac-migration)).
 - Store names cannot set chart values. Per-store values reach Helm only through a values file, never
   `--set`/`--set-string` (which split on `,` and `=`, so a name like `Shop,host=app.example.com` would have
   set the Ingress host or images), and names are limited to letters, digits, spaces and `. ' & ( ) -`.
@@ -109,6 +136,10 @@ and results reach the model and the team's MCP clients. What it can try, and wha
 - CSRF: SameSite=Strict cookie, and every state-changing request must be `application/json`, which a
   cross-site form cannot send.
 - Dashboard: strict Content-Security-Policy, `frame-ancestors 'none'`, `nosniff`.
+- Upstream URLs: plain `http://` only for allow-listed in-cluster hosts (`*.svc.cluster.local`); anything
+  else must be `https://`, which is also all the gateway's egress NetworkPolicy opens to the outside.
+  Switching a server to `authType: none` always deletes its stored credential. Every server action,
+  including an on-demand health check (`POST /servers/:id/refresh`), is admin-only in the API itself.
 - Kubernetes: no service-account tokens mounted, except in the store-provisioner (the only component that
   calls the Kubernetes API; see "Store provisioning" above). Containers are non-root
   with read-only root filesystems and drop all capabilities. WordPress/Apache is the exception: it starts as

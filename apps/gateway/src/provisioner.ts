@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import type { Db } from './db.ts';
-import type { Helm, Kube } from './kube.ts';
+import { type AccessCheck, type Helm, type Kube, MCP_TOKEN_SECRET } from './kube.ts';
 import { createServer } from './servers.ts';
 import { type StoreRow, storeServerSlug } from './stores.ts';
 import type { ServerRow, UpstreamPool } from './upstreams.ts';
@@ -39,6 +39,37 @@ const defaultMcpUrl = (ns: string) => `http://woocommerce-mcp.${ns}.svc.cluster.
 
 /** A step that cannot succeed by retrying (e.g. the namespace belongs to someone else). */
 class PermanentError extends Error {}
+
+/**
+ * Rights the provisioner must not hold. Any of them means the cluster still runs RBAC from an older chart (a
+ * cluster-wide role over Secrets and workloads), or someone widened it. Checked at startup.
+ */
+export function forbiddenRights(platformNamespace: string): AccessCheck[] {
+  return [
+    { verb: 'get', resource: 'secrets', namespace: platformNamespace },
+    { verb: 'list', resource: 'secrets' },
+    { verb: 'create', resource: 'deployments', group: 'apps', namespace: 'kube-system' },
+    { verb: 'create', resource: 'pods', namespace: 'kube-system' },
+    { verb: 'update', resource: 'clusterroles', group: 'rbac.authorization.k8s.io' },
+  ];
+}
+
+/** Throws when the provisioner holds rights it must not: it then refuses to work instead of operating with them. */
+export async function assertLeastPrivilege(kube: Kube, platformNamespace: string): Promise<void> {
+  const held: string[] = [];
+  for (const c of forbiddenRights(platformNamespace)) {
+    if (await kube.allowed(c))
+      held.push(
+        `${c.verb} ${c.group ? `${c.group}/` : ''}${c.resource} in ${c.namespace ?? 'all namespaces'}`,
+      );
+  }
+  if (held.length) {
+    throw new Error(
+      `store-provisioner holds rights it must not have (${held.join('; ')}). The cluster runs RBAC from an older ` +
+        'platform chart: upgrade the chart (docs/design.md, "Provisioner RBAC migration") before starting it.',
+    );
+  }
+}
 
 export class Provisioner {
   readonly #d: ProvisionerDeps;
@@ -158,8 +189,8 @@ export class Provisioner {
       WC_CONSUMER_KEY: `ck_${hex(20)}`,
       WC_CONSUMER_SECRET: `cs_${hex(20)}`,
     });
-    await kube.createSecret(row.namespace, 'woocommerce-mcp-auth', { MCP_AUTH_TOKEN: hex(32) });
-    const token = (await kube.getSecret(row.namespace, 'woocommerce-mcp-auth'))?.MCP_AUTH_TOKEN;
+    await kube.createSecret(row.namespace, MCP_TOKEN_SECRET, { MCP_AUTH_TOKEN: hex(32) });
+    const token = await kube.readMcpToken(row.namespace);
     if (!token) throw new Error('MCP token Secret is missing');
 
     await this.#step(row, 'Installing WordPress, MariaDB and WooCommerce (Helm)');

@@ -1,5 +1,6 @@
-import { type FormEvent, useCallback, useEffect, useState } from 'react';
+import { type FormEvent, useEffect, useRef, useState } from 'react';
 import { api, type Me } from '../api.ts';
+import { type Poller, poll } from '../poll.ts';
 
 interface Store {
   id: string;
@@ -32,16 +33,18 @@ export function Stores({ me }: { me: Me }) {
   const [stores, setStores] = useState<Store[]>([]);
   const [error, setError] = useState('');
 
-  const load = useCallback(() => {
-    api<Store[]>('/stores')
-      .then(setStores)
-      .catch((e) => setError(e.message));
-  }, []);
+  const poller = useRef<Poller | null>(null);
   useEffect(() => {
-    load();
-    const t = setInterval(load, 5000);
-    return () => clearInterval(t);
-  }, [load]);
+    const p = poll(
+      (signal) => api<Store[]>('/stores', 'GET', undefined, signal),
+      setStores,
+      (e) => setError(e.message),
+      5000,
+    );
+    poller.current = p;
+    return () => p.stop();
+  }, []);
+  const load = () => poller.current?.refresh();
 
   async function act(fn: () => Promise<unknown>) {
     setError('');
@@ -71,9 +74,10 @@ export function Stores({ me }: { me: Me }) {
         registered in the gateway as <code>store-&lt;slug&gt;</code>. Provisioning takes a few minutes.
       </p>
       <form className="row" onSubmit={create}>
-        <input name="name" placeholder="Store name" required maxLength={80} />
+        <input name="name" aria-label="Store name" placeholder="Store name" required maxLength={80} />
         <input
           name="slug"
+          aria-label="Store slug"
           placeholder="slug, e.g. acme"
           required
           pattern="[a-z][a-z0-9\-]{1,17}"
@@ -81,8 +85,13 @@ export function Stores({ me }: { me: Me }) {
         />
         <button type="submit">Create store</button>
       </form>
-      {error && <p className="error">{error}</p>}
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
       <table>
+        <caption className="sr-only">Stores</caption>
         <thead>
           <tr>
             <th>Store</th>

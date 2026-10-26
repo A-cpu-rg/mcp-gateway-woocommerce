@@ -165,6 +165,59 @@ describe('gateway', { skip }, () => {
     await client.close();
   });
 
+  test('members cannot trigger upstream health checks (POST /servers/:id/refresh is admin-only)', async () => {
+    const list = (await gw.request('/api/servers', { cookie: adminCookie })).json as {
+      id: string;
+      slug: string;
+    }[];
+    const shop = list.find((s) => s.slug === 'shop') as { id: string };
+    const member = await gw.request(`/api/servers/${shop.id}/refresh`, {
+      method: 'POST',
+      cookie: memberCookie,
+      body: '{}',
+    });
+    assert.equal(member.status, 403, member.text);
+    const admin = await gw.request(`/api/servers/${shop.id}/refresh`, {
+      method: 'POST',
+      cookie: adminCookie,
+      body: '{}',
+    });
+    assert.equal(admin.status, 200, admin.text);
+  });
+
+  test('switching a server to authType "none" always clears its stored credential', async () => {
+    const created = await addServer({
+      slug: 'cred',
+      name: 'Cred',
+      url: ups[1]?.url,
+      authType: 'bearer',
+      credential: 'old-secret-123',
+    });
+    const stored = async () =>
+      (await gw.db.query('SELECT credential_enc FROM upstream_servers WHERE id = $1', [created.id])).rows[0]
+        .credential_enc;
+    assert.ok(await stored());
+    const base = { slug: 'cred', name: 'Cred', url: ups[1]?.url };
+    // A credential together with "none" is a contradiction: rejected, nothing changes.
+    const both = await gw.request(`/api/servers/${created.id}`, {
+      method: 'PUT',
+      cookie: adminCookie,
+      body: JSON.stringify({ ...base, authType: 'none', credential: 'x-secret' }),
+    });
+    assert.equal(both.status, 400, both.text);
+    assert.ok(await stored());
+    // "credential" omitted (would mean "keep" for bearer/header): still cleared for "none".
+    const none = await gw.request(`/api/servers/${created.id}`, {
+      method: 'PUT',
+      cookie: adminCookie,
+      body: JSON.stringify({ ...base, authType: 'none' }),
+    });
+    assert.equal(none.status, 200, none.text);
+    assert.equal(none.json.hasCredential, false);
+    assert.equal(await stored(), null, 'no stale secret material left in the database');
+    await gw.request(`/api/servers/${created.id}`, { method: 'DELETE', cookie: adminCookie, body: '{}' });
+  });
+
   test('admin issues a key for a member: it acts and is audited as the member; members cannot', async () => {
     const users = (await gw.request('/api/users', { cookie: adminCookie })).json as {
       id: string;

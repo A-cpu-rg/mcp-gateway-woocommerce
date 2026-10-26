@@ -42,7 +42,12 @@ async function insertAudit(db: Db, a: AuditEntry): Promise<string> {
   return rows[0]?.id as string;
 }
 
-/** Best effort: for rejected attempts, where nothing reached an upstream. */
+/**
+ * Audit for rejected attempts (denied, unknown tool, disabled server, revoked or unknown key): best effort.
+ * Nothing reached an upstream and the request is refused either way, so failing it harder protects nothing;
+ * a row that cannot be written is reported on stderr (`audit write failed`) instead of being lost silently.
+ * Calls that do reach an upstream are audited durably in Broker.callTool (no row, no call).
+ */
 export async function writeAudit(db: Db, a: AuditEntry): Promise<void> {
   try {
     await insertAudit(db, a);
@@ -50,6 +55,7 @@ export async function writeAudit(db: Db, a: AuditEntry): Promise<void> {
     console.error(
       JSON.stringify({
         msg: 'audit write failed',
+        kind: 'rejected attempt',
         error: String(err),
         entry: { ...a, principal: a.principal.userId },
       }),

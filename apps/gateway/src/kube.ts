@@ -12,15 +12,36 @@ export interface Kube {
   getNamespace(name: string): Promise<{ labels: Record<string, string>; terminating: boolean } | null>;
   createNamespace(name: string, labels: Record<string, string>): Promise<void>;
   deleteNamespace(name: string): Promise<void>;
-  getSecret(namespace: string, name: string): Promise<Record<string, string> | null>;
-  /** Creates the Secret unless it exists; an existing Secret is never overwritten. */
+  /**
+   * The store's MCP token (Secret woocommerce-mcp-auth), the only Secret the provisioner reads: it registers
+   * the store in the gateway with it. RBAC grants `get` on that Secret name only.
+   */
+  readMcpToken(namespace: string): Promise<string | null>;
+  /** Creates the Secret unless it exists. Never reads, updates or overwrites one. */
   createSecret(namespace: string, name: string, data: Record<string, string>): Promise<void>;
   /**
    * Binds the provisioner to its namespaced rights inside one store namespace (RoleBinding to the tenant
    * ClusterRole). It holds no such rights cluster-wide, so this runs before anything else in the namespace.
+   * An existing binding is verified, never trusted by name.
    */
   ensureAccess(namespace: string): Promise<void>;
+  /** Whether this identity may perform the action (SelfSubjectAccessReview). */
+  allowed(check: AccessCheck): Promise<boolean>;
 }
+
+export interface AccessCheck {
+  verb: string;
+  resource: string;
+  group?: string;
+  /** Omitted: cluster-wide (all namespaces). */
+  namespace?: string;
+}
+
+/** One Kubernetes API request; throws KubeError for non-2xx responses. */
+export type KubeCall = (method: string, path: string, body?: unknown) => Promise<Record<string, unknown>>;
+
+export const MCP_TOKEN_SECRET = 'woocommerce-mcp-auth';
+const BINDING = 'store-provisioner';
 
 /** Who the provisioner is, and the ClusterRole it binds itself to inside each store namespace. */
 export interface KubeAccess {
@@ -69,6 +90,11 @@ export function inClusterKube(access: KubeAccess): Kube {
     if (!res.ok) throw new KubeError(res.status, `${method} ${path}: ${json.message ?? res.status}`);
     return json;
   }
+  return kubeClient(call, access);
+}
+
+/** The provisioner's Kubernetes operations over any transport (tests pass a fake `call`). */
+export function kubeClient(call: KubeCall, access: KubeAccess): Kube {
   const missing = (err: unknown) => err instanceof KubeError && err.status === 404;
   const exists = (err: unknown) => err instanceof KubeError && err.status === 409;
 
@@ -98,15 +124,14 @@ export function inClusterKube(access: KubeAccess): Kube {
         if (!missing(err)) throw err;
       });
     },
-    async getSecret(namespace, name) {
+    async readMcpToken(namespace) {
       assertStoreNamespace(namespace);
       try {
-        const s = (await call('GET', `/api/v1/namespaces/${namespace}/secrets/${name}`)) as {
+        const s = (await call('GET', `/api/v1/namespaces/${namespace}/secrets/${MCP_TOKEN_SECRET}`)) as {
           data?: Record<string, string>;
         };
-        return Object.fromEntries(
-          Object.entries(s.data ?? {}).map(([k, v]) => [k, Buffer.from(v, 'base64').toString('utf8')]),
-        );
+        const token = s.data?.MCP_AUTH_TOKEN;
+        return token ? Buffer.from(token, 'base64').toString('utf8') : null;
       } catch (err) {
         if (missing(err)) return null;
         throw err;
@@ -124,16 +149,46 @@ export function inClusterKube(access: KubeAccess): Kube {
     },
     async ensureAccess(namespace) {
       assertStoreNamespace(namespace);
-      await call('POST', `/apis/rbac.authorization.k8s.io/v1/namespaces/${namespace}/rolebindings`, {
-        metadata: {
-          name: 'store-provisioner',
-          labels: { 'app.kubernetes.io/managed-by': 'store-provisioner' },
-        },
-        roleRef: { apiGroup: 'rbac.authorization.k8s.io', kind: 'ClusterRole', name: access.tenantRole },
-        subjects: [{ kind: 'ServiceAccount', ...access.serviceAccount }],
-      }).catch((err) => {
+      const path = `/apis/rbac.authorization.k8s.io/v1/namespaces/${namespace}/rolebindings`;
+      const roleRef = { apiGroup: 'rbac.authorization.k8s.io', kind: 'ClusterRole', name: access.tenantRole };
+      const subject = { kind: 'ServiceAccount', ...access.serviceAccount };
+      try {
+        await call('POST', path, {
+          metadata: { name: BINDING, labels: { 'app.kubernetes.io/managed-by': 'store-provisioner' } },
+          roleRef,
+          subjects: [subject],
+        });
+      } catch (err) {
         if (!exists(err)) throw err;
+        // A binding with this name exists: use it only if it is exactly the one we would have created.
+        const rb = (await call('GET', `${path}/${BINDING}`)) as {
+          roleRef?: Record<string, string>;
+          subjects?: Record<string, string>[];
+        };
+        const s = rb.subjects ?? [];
+        const ok =
+          rb.roleRef?.apiGroup === roleRef.apiGroup &&
+          rb.roleRef?.kind === roleRef.kind &&
+          rb.roleRef?.name === roleRef.name &&
+          s.length === 1 &&
+          s[0]?.kind === subject.kind &&
+          s[0]?.name === subject.name &&
+          s[0]?.namespace === subject.namespace;
+        if (!ok) {
+          throw new Error(
+            `RoleBinding ${BINDING} in ${namespace} does not bind ClusterRole ${roleRef.name} to ` +
+              `${subject.namespace}/${subject.name} only; refusing to use it (inspect who changed it)`,
+          );
+        }
+      }
+    },
+    async allowed({ verb, resource, group = '', namespace }) {
+      const review = await call('POST', '/apis/authorization.k8s.io/v1/selfsubjectaccessreviews', {
+        apiVersion: 'authorization.k8s.io/v1',
+        kind: 'SelfSubjectAccessReview',
+        spec: { resourceAttributes: { verb, resource, group, ...(namespace ? { namespace } : {}) } },
       });
+      return (review.status as { allowed?: boolean } | undefined)?.allowed === true;
     },
   };
 }
@@ -182,11 +237,22 @@ export function helmUpgradeArgs(
   ];
 }
 
+/**
+ * Helm keeps release records in ConfigMaps rather than Secrets, so the provisioner needs no read access to
+ * Secrets in store namespaces (the store chart itself creates none and uses no `lookup`).
+ */
+export const HELM_ENV = { HELM_DRIVER: 'configmap' } as const;
+
 /** Runs the helm CLI (in-cluster config) against the store chart. Release name is "store" in every namespace. */
 export function helmCli(opts: { chartDir: string; valuesFile: string }): Helm {
   function helm(args: string[], timeoutMs: number): Promise<string> {
     return new Promise((resolve, reject) => {
-      execFile('helm', args, { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+      const options = {
+        timeout: timeoutMs,
+        maxBuffer: 4 * 1024 * 1024,
+        env: { ...process.env, ...HELM_ENV },
+      };
+      execFile('helm', args, options, (err, stdout, stderr) => {
         if (err) {
           const detail = (stderr || err.message).trim().split('\n').slice(-3).join(' ').slice(0, 400);
           reject(new Error(`helm ${args[0]}: ${detail}`));

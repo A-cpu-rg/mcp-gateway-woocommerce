@@ -113,6 +113,12 @@ export async function validateUpstreamUrl(
   if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new UrlPolicyError('only http(s) URLs');
   if (url.username || url.password) throw new UrlPolicyError('credentials in URL are not allowed');
   const host = url.hostname.replace(/^\[|\]$/g, '');
+  // Plain HTTP only inside the cluster (allow-listed hosts such as *.svc.cluster.local). Anything else must be
+  // https: credentials would cross the internet unencrypted, and the gateway's egress NetworkPolicy opens
+  // only port 443 to the outside, so an external http:// server would register but never connect.
+  if (url.protocol === 'http:' && !hostAllowed(host, allowedHosts)) {
+    throw new UrlPolicyError(`use https for ${host}: plain http is only allowed for in-cluster hosts`);
+  }
   let ips: string[];
   try {
     ips = isIP(host) ? [host] : await resolve(host);

@@ -166,6 +166,8 @@ export function createApi(d: ApiDeps): Hono<Env> {
     return c.json(publicServer(fresh, d.pool));
   });
   api.post('/servers/:id/refresh', async (c) => {
+    // Admin-only like every other server action: it makes the gateway connect out to the upstream on demand.
+    requireAdmin(c);
     const rows = await d.pool.servers();
     const row = rows.find((r) => r.id === c.req.param('id'));
     if (!row) throw new HttpError(404, 'not_found', 'server not found');

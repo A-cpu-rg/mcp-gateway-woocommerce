@@ -41,6 +41,19 @@ fi
 if doc ClusterRoleBinding platform-store-provisioner <<<"$all" | grep -q 'store-tenant'; then
   fail "tenant role is bound cluster-wide"
 fi
-doc ValidatingAdmissionPolicy platform-store-provisioner <<<"$all" | grep -q "startsWith('store-')" \
-  || fail "admission policy restricting the provisioner to store-* is missing"
+vap=$(doc ValidatingAdmissionPolicy platform-store-provisioner <<<"$all")
+grep -q "startsWith('store-')" <<<"$vap" || fail "admission policy restricting the provisioner to store-* is missing"
+grep -q "'urumi.io/store-id' in oldObject.metadata.labels" <<<"$vap" \
+  || fail "admission policy does not limit namespace deletes to namespaces created as stores"
 pass "provisioner RBAC: no cluster-wide Secrets/workloads, tenant role bound per namespace, admission policy"
+
+# Inside a store namespace the provisioner may create Secrets and read only the MCP token: the Secret rules of
+# the tenant role are exactly that (no list/watch/update/delete, no read of store-db / store-wp-admin).
+tenant=$(doc ClusterRole platform-store-tenant <<<"$all")
+flat=$(tr '\n' ' ' <<<"$tenant" | tr -s ' ')
+grep -qF 'resources: [secrets] verbs: [create] -' <<<"$flat" || fail "tenant role: no create-only Secret rule"
+grep -qF 'resources: [secrets] verbs: [get] resourceNames: [woocommerce-mcp-auth] -' <<<"$flat" \
+  || fail "tenant role: Secret get is not limited to woocommerce-mcp-auth"
+[ "$(grep -c 'secrets' <<<"$tenant")" -eq 2 ] || fail "tenant role mentions Secrets in more than those two rules"
+grep -q 'name: HELM_DRIVER, value: configmap' <<<"$all" || fail "provisioner does not run Helm with HELM_DRIVER=configmap"
+pass "tenant role: Secrets create-only plus get on the MCP token; Helm releases in ConfigMaps"

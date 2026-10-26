@@ -6,7 +6,7 @@
     "dev": "vite",
     "build": "vite build",
     "typecheck": "tsc -p .",
-    "test": "node -e \"\""
+    "test": "node --test \"test/**/*.test.ts\""
   },
   "dependencies": {
     "react": "19.3.1",

@@ -1,5 +1,6 @@
-import { type FormEvent, useCallback, useEffect, useState } from 'react';
+import { type FormEvent, useEffect, useRef, useState } from 'react';
 import { api, type Me, type Server } from '../api.ts';
+import { type Poller, poll } from '../poll.ts';
 
 const STATUS_LABEL: Record<Server['status'], string> = {
   connected: 'Connected',
@@ -14,16 +15,18 @@ export function Servers({ me }: { me: Me }) {
   const [error, setError] = useState('');
   const isAdmin = me.role === 'admin';
 
-  const load = useCallback(() => {
-    api<Server[]>('/servers')
-      .then(setServers)
-      .catch((e) => setError(e.message));
-  }, []);
+  const poller = useRef<Poller | null>(null);
   useEffect(() => {
-    load();
-    const t = setInterval(load, 10_000);
-    return () => clearInterval(t);
-  }, [load]);
+    const p = poll(
+      (signal) => api<Server[]>('/servers', 'GET', undefined, signal),
+      setServers,
+      (e) => setError(e.message),
+      10_000,
+    );
+    poller.current = p;
+    return () => p.stop();
+  }, []);
+  const load = () => poller.current?.refresh();
 
   async function act(fn: () => Promise<unknown>) {
     setError('');
@@ -51,7 +54,11 @@ export function Servers({ me }: { me: Me }) {
       <p className="muted">
         One endpoint for every enabled server: <code>{me.mcpUrl}</code>
       </p>
-      {error && <p className="error">{error}</p>}
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
       {editing && (
         <ServerForm
           server={editing === 'new' ? undefined : editing}
@@ -209,7 +216,11 @@ function ServerForm({ server, onDone }: { server?: Server; onDone: () => void })
           ))}
         </fieldset>
       )}
-      {error && <p className="error">{error}</p>}
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
       <div className="actions">
         <button type="submit">Save</button>
         <button type="button" onClick={onDone}>

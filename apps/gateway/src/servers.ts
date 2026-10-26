@@ -29,7 +29,7 @@ export const serverInput = z
       .regex(HEADER_NAME)
       .refine((h) => !FORBIDDEN_HEADERS.has(h.toLowerCase()), 'reserved header')
       .nullish(),
-    /** undefined = keep existing, null = clear, string = replace */
+    /** undefined = keep existing, null = clear, string = replace. Always cleared when authType is "none". */
     credential: z.string().min(1).max(4096).nullish(),
     timeoutMs: z.number().int().min(1000).max(60000).default(10000),
     adminOnlyTools: z.array(z.string().max(128)).max(200).default([]),
@@ -37,6 +37,10 @@ export const serverInput = z
   .refine((s) => s.authType !== 'header' || !!s.authHeader, {
     message: 'authHeader required',
     path: ['authHeader'],
+  })
+  .refine((s) => s.authType !== 'none' || typeof s.credential !== 'string', {
+    message: 'a credential is only used with authType "bearer" or "header"',
+    path: ['credential'],
   });
 export type ServerInput = z.infer<typeof serverInput>;
 
@@ -97,7 +101,9 @@ export async function updateServer(d: ServerDeps, id: string, input: ServerInput
       input.credential ? encrypt(d.key, input.credential) : null,
       input.timeoutMs,
       input.adminOnlyTools,
-      input.credential !== undefined, // undefined = keep the stored credential
+      // Replace or clear when a credential (or null) is sent; always clear for "none", so no stale secret is
+      // left behind whatever shape the request has; otherwise (undefined) keep the stored one.
+      input.authType === 'none' || input.credential !== undefined,
     ],
   );
   const row = rows[0];

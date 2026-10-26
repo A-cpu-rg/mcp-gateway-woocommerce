@@ -143,9 +143,10 @@ provisioned within 15 minutes becomes **Failed** with the reason; **Retry** runs
 | Lint, types | `pnpm lint && pnpm typecheck` | — |
 | Unit + integration (real MCP servers, real Postgres) | `TEST_DATABASE_URL=postgres://… pnpm test` | Postgres |
 | Charts: lint, render both envs, schema-validate, security invariants (`scripts/chart-checks.sh`) | `make charts-check` | helm, kubeconform |
+| Every image target builds and contains what it needs | `docker build --target …` then `scripts/image-check.sh` | Docker |
 | Definition of done, two users, incl. revoke / disable / dead upstream | `make e2e` | running cluster |
 
-CI (`.github/workflows/ci.yml`) runs the first three on every push.
+CI (`.github/workflows/ci.yml`) runs the first three and the image builds on every push.
 
 ## Verification status
 

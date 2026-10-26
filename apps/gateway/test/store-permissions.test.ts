@@ -325,7 +325,7 @@ describe('store owner permissions', { skip }, () => {
 });
 
 describe('migration 003: links servers registered before store_id existed', { skip }, () => {
-  test('links the provisioner registration, not a server that predates the store', async () => {
+  test("links only the store's own MCP server: not a same-named server, an earlier one, or another store's", async () => {
     const schema = `t_${randomBytes(6).toString('hex')}`;
     const admin = createDb(DATABASE_URL as string);
     await admin.query(`CREATE SCHEMA ${schema}`);
@@ -340,10 +340,6 @@ describe('migration 003: links servers registered before store_id existed', { sk
           "INSERT INTO users (email, name, role) VALUES ('o@example.com', 'O', 'member') RETURNING id",
         )
       ).rows[0].id;
-      await db.query(
-        `INSERT INTO upstream_servers (slug, name, url, created_at)
-         VALUES ('store-early', 'early', 'http://x', now() - interval '1 hour')`,
-      );
       const store = async (slug: string) =>
         (
           await db.query(
@@ -352,17 +348,33 @@ describe('migration 003: links servers registered before store_id existed', { sk
             [slug, owner],
           )
         ).rows[0].id as string;
+      const mcpUrl = (slug: string) => `http://woocommerce-mcp.store-${slug}.svc.cluster.local:8080/mcp`;
+      const server = (slug: string, url: string, createdAt = 'now()') =>
+        db.query(
+          `INSERT INTO upstream_servers (slug, name, url, created_at) VALUES ($1, $1, $2, ${createdAt})`,
+          [slug, url],
+        );
+      // The provisioner's registration: the store's own MCP Service, registered after the store.
       const shop = await store('shop');
+      await server('store-shop', mcpUrl('shop'));
+      // Copilot's scenario: store requested, then an admin registers an unrelated server under the store's
+      // name before the migration runs. Same slug, later timestamp, but not the store's MCP server.
+      await store('hijack');
+      await server('store-hijack', 'https://unrelated.example.com/mcp');
+      // Right URL, but registered before the store existed.
+      await server('store-early', mcpUrl('early'), "now() - interval '1 hour'");
       await store('early');
-      await db.query(
-        "INSERT INTO upstream_servers (slug, name, url) VALUES ('store-shop', 'shop', 'http://x')",
-      );
+      // Another store's MCP Service under this store's name.
+      await store('swap');
+      await server('store-swap', mcpUrl('shop'));
 
       assert.deepEqual(await migrate(db), ['003_server_store.sql']);
       const { rows } = await db.query('SELECT slug, store_id FROM upstream_servers ORDER BY slug');
       assert.deepEqual(rows, [
         { slug: 'store-early', store_id: null },
+        { slug: 'store-hijack', store_id: null },
         { slug: 'store-shop', store_id: shop },
+        { slug: 'store-swap', store_id: null },
       ]);
     } finally {
       await db.end();

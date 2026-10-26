@@ -36,14 +36,15 @@ test('url guard: private ranges only for allow-listed hosts; public addresses al
 });
 
 test('url guard: registration rejects IPv4-in-IPv6 URL literals that reach metadata or internal hosts', async () => {
+  // https, so the address check (not the plain-http rule) is what rejects them.
   for (const url of [
-    'http://[::ffff:169.254.169.254]/mcp',
-    'http://[::ffff:a9fe:a9fe]/mcp',
-    'http://[64:ff9b::a9fe:a9fe]/mcp',
-    'http://[::ffff:127.0.0.1]/mcp',
-    'http://[::ffff:10.0.0.1]/mcp',
+    'https://[::ffff:169.254.169.254]/mcp',
+    'https://[::ffff:a9fe:a9fe]/mcp',
+    'https://[64:ff9b::a9fe:a9fe]/mcp',
+    'https://[::ffff:127.0.0.1]/mcp',
+    'https://[::ffff:10.0.0.1]/mcp',
   ])
-    await assert.rejects(validateUpstreamUrl(url, CLUSTER), url);
+    await assert.rejects(validateUpstreamUrl(url, CLUSTER), /never allowed|internal address/, url);
 });
 
 test('url guard: registration resolves names and checks every address', async () => {
@@ -53,6 +54,24 @@ test('url guard: registration resolves names and checks every address', async ()
     '93.184.216.34',
   ]);
   assert.equal(ok, 'https://mcp.example.com/mcp');
+});
+
+test('url guard: plain http only for in-cluster hosts, matching the gateway egress policy (port 443 out)', async () => {
+  const pub = async () => ['93.184.216.34'];
+  await assert.rejects(
+    validateUpstreamUrl('http://mcp.example.com/mcp', CLUSTER, pub),
+    /use https for mcp.example.com/,
+  );
+  await assert.rejects(validateUpstreamUrl('http://93.184.216.34/mcp', CLUSTER), /use https/);
+  assert.equal(
+    await validateUpstreamUrl('https://mcp.example.com/mcp', CLUSTER, pub),
+    'https://mcp.example.com/mcp',
+  );
+  const cluster = async () => ['10.43.0.12'];
+  assert.equal(
+    await validateUpstreamUrl('http://woocommerce-mcp.store.svc.cluster.local:8080/mcp', CLUSTER, cluster),
+    'http://woocommerce-mcp.store.svc.cluster.local:8080/mcp',
+  );
 });
 
 test('url guard: connection-time check blocks a name that resolves to loopback (DNS rebinding)', async () => {

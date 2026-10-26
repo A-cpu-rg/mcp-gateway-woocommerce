@@ -22,7 +22,11 @@ export function Login({ onLogin }: { onLogin: () => void }) {
       <label>
         Password <input name="password" type="password" required autoComplete="current-password" />
       </label>
-      {error && <p className="error">{error}</p>}
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
       <button type="submit">Log in</button>
     </form>
   );
@@ -57,7 +61,11 @@ export function Invite({ token }: { token: string }) {
         Choose a password (min. 10 characters)
         <input name="password" type="password" minLength={10} required autoComplete="new-password" />
       </label>
-      {error && <p className="error">{error}</p>}
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
       <button type="submit">Create account</button>
     </form>
   );

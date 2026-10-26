@@ -75,7 +75,13 @@ export function Keys({ me }: { me: Me }) {
         gateway as you. Upstream credentials stay on the server.
       </p>
       <form className="row" onSubmit={create}>
-        <input name="name" placeholder="Key name, e.g. laptop" required maxLength={80} />
+        <input
+          name="name"
+          aria-label="Key name"
+          placeholder="Key name, e.g. laptop"
+          required
+          maxLength={80}
+        />
         {isAdmin && users.length > 0 && (
           <label className="inline">
             For{' '}
@@ -127,7 +133,11 @@ export function Keys({ me }: { me: Me }) {
           </button>
         </div>
       )}
-      {error && <p className="error">{error}</p>}
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
       {isAdmin && (
         <label className="inline">
           <input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /> Show all team
@@ -135,6 +145,7 @@ export function Keys({ me }: { me: Me }) {
         </label>
       )}
       <table>
+        <caption className="sr-only">API keys</caption>
         <thead>
           <tr>
             <th>Name</th>

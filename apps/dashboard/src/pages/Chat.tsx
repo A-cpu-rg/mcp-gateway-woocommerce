@@ -58,7 +58,7 @@ export function Chat({ me }: { me: Me }) {
         Answers with the same gateway tools you can use, as {me.email}. Every tool call appears in the audit
         log.
       </p>
-      <div className="transcript">
+      <div className="transcript" role="log" aria-live="polite" aria-label="Conversation">
         {turns.map((t, i) => {
           const key = `${t.kind}-${i}`;
           if (t.kind === 'tool') {
@@ -81,7 +81,13 @@ export function Chat({ me }: { me: Me }) {
         {busy && <div className="muted">Thinking…</div>}
       </div>
       <form className="row" onSubmit={send}>
-        <input name="q" placeholder="e.g. What orders came in today?" autoComplete="off" disabled={busy} />
+        <input
+          name="q"
+          aria-label="Ask the agent"
+          placeholder="e.g. What orders came in today?"
+          autoComplete="off"
+          disabled={busy}
+        />
         <button type="submit" disabled={busy}>
           Send
         </button>

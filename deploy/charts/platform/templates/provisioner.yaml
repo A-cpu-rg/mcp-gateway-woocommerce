@@ -31,8 +31,13 @@ rules:
     verbs: [bind]
     resourceNames: [{{ .Release.Namespace }}-store-tenant]
 ---
-# What one store needs inside its own namespace: the kinds the store chart creates, Helm's release Secrets,
-# and what `helm --wait` watches. Never bound cluster-wide; only through a RoleBinding in a store namespace.
+# What one store needs inside its own namespace: the kinds the store chart creates, Helm's release records
+# (ConfigMaps: the provisioner runs Helm with HELM_DRIVER=configmap) and what `helm --wait` watches. Never
+# bound cluster-wide; only through a RoleBinding in a store namespace.
+# Secrets: the provisioner creates the four store Secrets and reads back only the MCP token it registers the
+# store with. It cannot list, read, update or delete any other Secret. Note what this does NOT stop: whoever
+# may create Deployments in a namespace can start a Pod that mounts that namespace's Secrets, so a compromised
+# provisioner can still reach every store's Secrets that way (see docs/threat-model.md).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -40,7 +45,14 @@ metadata:
   labels: {{- include "platform.labels" . | nindent 4 }}
 rules:
   - apiGroups: [""]
-    resources: [secrets, configmaps, services, persistentvolumeclaims, resourcequotas, limitranges]
+    resources: [secrets]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get]
+    resourceNames: [woocommerce-mcp-auth]
+  - apiGroups: [""]
+    resources: [configmaps, services, persistentvolumeclaims, resourcequotas, limitranges]
     verbs: [get, list, watch, create, update, patch, delete]
   - apiGroups: [""]
     resources: [pods, events]
@@ -70,9 +82,12 @@ subjects:
     namespace: {{ .Release.Namespace }}
 {{- if .Values.provisioner.admissionPolicy }}
 ---
-# RBAC cannot express "only namespaces named store-*". This policy does: for requests made by the
-# provisioner, namespaces it creates or deletes must be store-*, and RoleBindings may only be created in
-# store-* namespaces, only to the tenant role, and only for the provisioner itself.
+# RBAC cannot express "only namespaces named store-*". This policy does, for requests made by the
+# provisioner: namespaces it creates must be store-* and carry the store labels (the gateway's egress policy
+# keys on them); namespaces it deletes must be store-* AND carry a store-id label, i.e. have been created as a
+# store, so it cannot delete an unrelated store-* namespace; RoleBindings only in store-* namespaces, only to
+# the tenant role, only for itself. Residual (documented): it can still delete ANY store's namespace; RBAC and
+# CEL cannot tie a delete to the one store row being reconciled.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -98,6 +113,15 @@ spec:
         request.resource.resource != 'namespaces' ||
         (request.operation == 'DELETE' ? oldObject : object).metadata.name.startsWith('store-')
       message: the store-provisioner may only create or delete store-* namespaces
+    - expression: >-
+        request.resource.resource != 'namespaces' || request.operation != 'CREATE' ||
+        (has(object.metadata.labels) && 'urumi.io/store-id' in object.metadata.labels &&
+         object.metadata.labels['urumi.io/store'] == 'true')
+      message: namespaces created by the store-provisioner must carry the urumi.io/store and store-id labels
+    - expression: >-
+        request.resource.resource != 'namespaces' || request.operation != 'DELETE' ||
+        (has(oldObject.metadata.labels) && 'urumi.io/store-id' in oldObject.metadata.labels)
+      message: the store-provisioner may only delete namespaces it created as stores (urumi.io/store-id label)
     - expression: "request.resource.resource != 'rolebindings' || request.namespace.startsWith('store-')"
       message: the store-provisioner may only manage RoleBindings in store-* namespaces
     - expression: >-
@@ -159,6 +183,8 @@ spec:
             - { name: PROVISION_CONCURRENCY, value: {{ .Values.stores.concurrency | quote }} }
             - { name: UPSTREAM_ALLOWED_HOSTS, value: {{ .Values.gateway.upstreamAllowedHosts | quote }} }
             - { name: HOME, value: /tmp }
+            # Release records in ConfigMaps, so the tenant role needs no Secret reads (kube.ts sets it too).
+            - { name: HELM_DRIVER, value: configmap }
             - { name: HELM_CACHE_HOME, value: /tmp/helm/cache }
             - { name: HELM_CONFIG_HOME, value: /tmp/helm/config }
             - { name: HELM_DATA_HOME, value: /tmp/helm/data }

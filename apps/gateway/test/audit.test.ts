@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { after, before, describe, test } from 'node:test';
 import * as z from 'zod/v4';
-import type { Principal } from '../src/auth.ts';
+import { createApiKey, type Principal, revokeApiKey } from '../src/auth.ts';
 import { Broker } from '../src/broker.ts';
 import { createDb, type Db, migrate } from '../src/db.ts';
+import { createMcpEndpoint } from '../src/mcp.ts';
 import { UpstreamPool } from '../src/upstreams.ts';
 import { DATABASE_URL, skip, startUpstream, textOf, type Upstream } from './helpers.ts';
 
@@ -66,7 +67,10 @@ describe('audit durability', { skip }, () => {
         ],
       }));
     });
-    await db.query("INSERT INTO upstream_servers (slug, name, url) VALUES ('shop', 'Shop', $1)", [up.url]);
+    await db.query(
+      "INSERT INTO upstream_servers (slug, name, url, admin_only_tools) VALUES ('shop', 'Shop', $1, '{create_product}')",
+      [up.url],
+    );
   });
   after(async () => {
     for (const pool of pools) await pool.stop();
@@ -111,5 +115,59 @@ describe('audit durability', { skip }, () => {
     assert.equal(row?.outcome, 'tool_error');
     assert.match(row?.error ?? '', /^WooCommerce error 404: Invalid ID/);
     assert.ok(!row?.error?.includes('abc123secret'), 'bearer token redacted');
+  });
+  test('rejected attempts are audited best effort: refused either way, a lost row is reported', async (t) => {
+    await db.query('DELETE FROM audit_log');
+    const logged = t.mock.method(console, 'error', () => {});
+    const noAudit = failing(/INSERT INTO audit_log/);
+    const member: Principal = { userId: p.userId, email: 'member@example.com', role: 'member' };
+    // Denied (admin-only tool), unknown tool: still refused, nothing reaches the upstream.
+    const denied = await broker(noAudit).callTool(member, 'mcp', 'shop__create_product', {});
+    assert.match(textOf(denied), /requires the admin role/);
+    const unknown = await broker(noAudit).callTool(p, 'chat', 'shop__no_such_tool', {});
+    assert.match(textOf(unknown), /Unknown tool/);
+    // Revoked key on the MCP endpoint: still 401.
+    const key = await createApiKey(db, p.userId, 'revoked');
+    await revokeApiKey(db, p, key.id);
+    const mcp = createMcpEndpoint(noAudit, broker(noAudit));
+    const res = await mcp.handle(
+      new Request('http://gateway.test/mcp', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${key.token}`,
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+        },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+      }),
+    );
+    await mcp.close();
+    assert.equal(res.status, 401);
+    assert.deepEqual(writes, [], 'no rejected attempt reached the upstream');
+    assert.deepEqual(await rows(), [], 'the audit store was down');
+    const reports = logged.mock.calls.map((c) => JSON.parse(String(c.arguments[0])));
+    assert.deepEqual(
+      reports.filter((r) => r.msg === 'audit write failed').map((r) => r.entry.outcome),
+      ['denied', 'not_found', 'auth_rejected'],
+      'each lost row is reported, not silently dropped',
+    );
+    assert.ok(
+      reports.every((r) => !JSON.stringify(r).includes(key.token)),
+      'the key is never logged',
+    );
+  });
+
+  test('with the audit store up, rejected attempts are recorded with user and outcome', async () => {
+    await db.query('DELETE FROM audit_log');
+    const member: Principal = { userId: p.userId, email: 'member@example.com', role: 'member' };
+    await broker(db).callTool(member, 'mcp', 'shop__create_product', {});
+    await broker(db).callTool(p, 'chat', 'shop__no_such_tool', {});
+    assert.deepEqual(
+      (await rows()).map((r) => [r.user_email, r.outcome]),
+      [
+        ['member@example.com', 'denied'],
+        ['ops@example.com', 'not_found'],
+      ],
+    );
   });
 });

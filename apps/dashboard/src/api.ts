@@ -8,12 +8,18 @@ export class ApiError extends Error {
   }
 }
 
-export async function api<T = unknown>(path: string, method = 'GET', body?: unknown): Promise<T> {
+export async function api<T = unknown>(
+  path: string,
+  method = 'GET',
+  body?: unknown,
+  signal?: AbortSignal,
+): Promise<T> {
   const res = await fetch(`/api${path}`, {
     method,
     credentials: 'same-origin',
     headers: method === 'GET' ? {} : { 'content-type': 'application/json' },
     body: method === 'GET' ? undefined : JSON.stringify(body ?? {}),
+    signal,
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new ApiError(res.status, data?.error?.message ?? `HTTP ${res.status}`);

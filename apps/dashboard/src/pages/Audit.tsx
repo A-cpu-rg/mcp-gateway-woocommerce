@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api, type Me } from '../api.ts';
+import { poll } from '../poll.ts';
 
 interface Row {
   id: number;
@@ -33,19 +34,22 @@ export function Audit({ me }: { me: Me }) {
   const [server, setServer] = useState('');
   const [error, setError] = useState('');
 
-  const load = useCallback(() => {
+  // A filter change starts a new poller; responses for the previous filter are discarded, never shown.
+  useEffect(() => {
     const q = new URLSearchParams();
     if (outcome) q.set('outcome', outcome);
     if (server) q.set('server', server);
-    api<Row[]>(`/audit?${q}`)
-      .then(setRows)
-      .catch((e) => setError(e.message));
+    const p = poll(
+      (signal) => api<Row[]>(`/audit?${q}`, 'GET', undefined, signal),
+      (r) => {
+        setRows(r);
+        setError('');
+      },
+      (e) => setError(e.message),
+      5000,
+    );
+    return () => p.stop();
   }, [outcome, server]);
-  useEffect(() => {
-    load();
-    const t = setInterval(load, 5000);
-    return () => clearInterval(t);
-  }, [load]);
 
   return (
     <section>
@@ -55,17 +59,27 @@ export function Audit({ me }: { me: Me }) {
         {me.role !== 'admin' && ' You see your own calls.'}
       </p>
       <div className="row">
-        <select value={outcome} onChange={(e) => setOutcome(e.target.value)}>
+        <select aria-label="Filter by outcome" value={outcome} onChange={(e) => setOutcome(e.target.value)}>
           {OUTCOMES.map((o) => (
             <option key={o} value={o}>
               {o || 'all outcomes'}
             </option>
           ))}
         </select>
-        <input placeholder="server slug" value={server} onChange={(e) => setServer(e.target.value.trim())} />
+        <input
+          aria-label="Filter by server slug"
+          placeholder="server slug"
+          value={server}
+          onChange={(e) => setServer(e.target.value.trim())}
+        />
       </div>
-      {error && <p className="error">{error}</p>}
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
       <table>
+        <caption className="sr-only">Audit log entries, newest first</caption>
         <thead>
           <tr>
             <th>When</th>

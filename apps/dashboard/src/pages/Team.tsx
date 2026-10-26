@@ -53,9 +53,9 @@ export function Team({ me }: { me: Me }) {
     <section>
       <h2>Team</h2>
       <form className="row" onSubmit={invite}>
-        <input name="name" placeholder="Name" required />
-        <input name="email" type="email" placeholder="Email" required />
-        <select name="role" defaultValue="member">
+        <input name="name" aria-label="Name" placeholder="Name" required />
+        <input name="email" type="email" aria-label="Email" placeholder="Email" required />
+        <select name="role" aria-label="Role" defaultValue="member">
           <option value="member">Member (uses tools)</option>
           <option value="admin">Admin (manages servers and members)</option>
         </select>
@@ -67,8 +67,13 @@ export function Team({ me }: { me: Me }) {
           <pre>{inviteUrl}</pre>
         </div>
       )}
-      {error && <p className="error">{error}</p>}
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
       <table>
+        <caption className="sr-only">Team members</caption>
         <thead>
           <tr>
             <th>Name</th>
@@ -85,6 +90,7 @@ export function Team({ me }: { me: Me }) {
               <td>{u.email}</td>
               <td>
                 <select
+                  aria-label={`Role of ${u.email}`}
                   value={u.role}
                   disabled={u.id === me.userId}
                   onChange={(e) => update(u, { role: e.target.value })}

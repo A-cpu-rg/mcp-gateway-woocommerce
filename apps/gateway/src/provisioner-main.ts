@@ -3,7 +3,7 @@ import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { createDb, migrate, waitForDb } from './db.ts';
 import { helmCli, inClusterKube } from './kube.ts';
-import { Provisioner } from './provisioner.ts';
+import { assertLeastPrivilege, Provisioner } from './provisioner.ts';
 import { UpstreamPool } from './upstreams.ts';
 import { createGuardedFetch } from './url-guard.ts';
 
@@ -25,13 +25,22 @@ const db = createDb(env('DATABASE_URL'));
 await waitForDb(db);
 await migrate(db);
 
+const kube = inClusterKube({
+  tenantRole: env('STORE_TENANT_ROLE'),
+  serviceAccount: { name: env('SERVICE_ACCOUNT_NAME'), namespace: env('GATEWAY_NAMESPACE') },
+});
+// Fail closed on stale or widened RBAC (e.g. the image upgraded without the chart): exit and say why.
+try {
+  await assertLeastPrivilege(kube, env('GATEWAY_NAMESPACE'));
+} catch (err) {
+  console.error(JSON.stringify({ msg: 'store-provisioner refusing to start', error: String(err) }));
+  process.exit(1);
+}
+
 const pool = new UpstreamPool(db, key, createGuardedFetch(allowedHosts));
 const provisioner = new Provisioner({
   db,
-  kube: inClusterKube({
-    tenantRole: env('STORE_TENANT_ROLE'),
-    serviceAccount: { name: env('SERVICE_ACCOUNT_NAME'), namespace: env('GATEWAY_NAMESPACE') },
-  }),
+  kube,
   helm: helmCli({ chartDir: env('STORE_CHART_DIR'), valuesFile: env('STORE_VALUES_FILE') }),
   pool,
   key,

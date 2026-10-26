@@ -46,9 +46,14 @@ function App() {
     <div className="layout">
       <header>
         <strong>MCP Gateway</strong>
-        <nav>
+        <nav aria-label="Main">
           {visible.map((t) => (
-            <a key={t} href={`#/${t}`} className={t === tab ? 'active' : ''}>
+            <a
+              key={t}
+              href={`#/${t}`}
+              className={t === tab ? 'active' : ''}
+              aria-current={t === tab ? 'page' : undefined}
+            >
               {t[0]?.toUpperCase() + t.slice(1)}
             </a>
           ))}

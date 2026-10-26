@@ -142,7 +142,7 @@ store-provisioner (own ServiceAccount) ──┘ claims work (FOR UPDATE SKIP LO
 
 | Concern | How |
 |---|---|
-| Who has cluster credentials | Only the store-provisioner (no Service, no Ingress, NetworkPolicy allows no ingress). The internet-facing gateway has none; it only writes rows. RBAC: cluster-wide only namespaces and RoleBindings to one tenant role, which it binds to itself in each store namespace it creates; an admission policy limits those writes to `store-*` (migration below). The code also refuses any namespace outside `store-*` and never deletes a namespace it did not label with the store's id |
+| Who has cluster credentials | Only the store-provisioner (no Service, no Ingress, NetworkPolicy allows no ingress). The internet-facing gateway has none; it only writes rows. A trusted tenant control plane: cluster-wide only namespaces and RoleBindings to one tenant role, which it binds to itself in each store namespace (an existing binding is verified exactly); an admission policy limits those writes to `store-*` and deletes to namespaces labelled as stores. In a store namespace it may create Secrets and read only `woocommerce-mcp-auth` (Helm releases live in ConfigMaps). It refuses to start while it holds rights from an older chart. It still controls every store namespace; see the threat model for that residual risk |
 | Several at once | Concurrency 3 per provisioner; each store is leased individually |
 | Safe to retry | Create with the same slug returns the existing store; every step is create-if-missing or `helm upgrade --install` |
 | Provisioner restarts mid-way | Its lease expires and the next provisioner re-runs the steps; a Helm release left `pending-*` is uninstalled first (volumes are kept) |
@@ -150,6 +150,7 @@ store-provisioner (own ServiceAccount) ──┘ claims work (FOR UPDATE SKIP LO
 | Not reachable except by the gateway | Unchanged store chart NetworkPolicies; the gateway's egress admits any namespace labelled `urumi.io/store=true`. The provisioner does not call store MCP servers either: it waits for the gateway's health check to report the server connected |
 | Isolation | Each store's MCP server reaches only its own WordPress; its WordPress only its own MariaDB (verified with probes across stores) |
 | Guardrails | ResourceQuota + LimitRange in every store namespace, 2 stores per user (checked under a per-user advisory lock), 15 min deadline |
+| Ownership link | `upstream_servers.store_id`, set by the provisioner when it registers a store's server. Migration 003 links older registrations only if the server is that store's own MCP Service (exact URL `http://woocommerce-mcp.<store namespace>.svc.cluster.local:8080/mcp`, same slug, registered after the store); a same-named server elsewhere stays unlinked and grants the owner nothing |
 | Teardown | Server disabled immediately (tools gone for every client), then registration deleted (both matched by the store link `store_id`, not the name; admins cannot rename or remove a store's registration through the API, 409), `helm uninstall`, namespace deleted (PVCs, Secrets, Ingress), row removed once the namespace is gone |
 
 Waiting for the gateway: the provisioner never calls a store's MCP server itself, so after registering it
@@ -163,6 +164,13 @@ Clusters installed from a chart version before least-privilege RBAC run a provis
 rights over Secrets and workloads. The new provisioner image and the new chart must ship together: the
 image needs the chart's `STORE_TENANT_ROLE` / `SERVICE_ACCOUNT_NAME` env and its RoleBinding rights, and
 the old image never creates RoleBindings, so it cannot work under the new RBAC. Not applied automatically:
+
+The new provisioner checks its own rights at startup (SelfSubjectAccessReview) and exits with *"holds rights it
+must not have … upgrade the chart"* if the old ClusterRole is still bound, so a partial upgrade cannot run
+with the old permissions. Helm release records move from Secrets to ConfigMaps (`HELM_DRIVER=configmap`):
+releases installed before keep their Secret records, which the new provisioner cannot read; that only matters
+for retrying a failed old store (Helm then installs a new release record and adopts the existing objects,
+which carry its annotations) and is harmless for teardown (the namespace deletion removes everything).
 
 1. Wait until no store is Provisioning or Deleting (Dashboard → Stores).
 2. Build the new images (`make images import`, or push a new version tag), then in the same step

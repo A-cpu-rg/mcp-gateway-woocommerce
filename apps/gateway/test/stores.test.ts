@@ -3,12 +3,12 @@ import { randomBytes } from 'node:crypto';
 import { after, before, describe, test } from 'node:test';
 import type { Principal } from '../src/auth.ts';
 import { createDb, type Db, migrate } from '../src/db.ts';
-import { assertStoreNamespace, type Helm, type Kube } from '../src/kube.ts';
+import { assertStoreNamespace, type Helm, type Kube, kubeClient } from '../src/kube.ts';
 import { Provisioner } from '../src/provisioner.ts';
 import { assertNotStoreServer, serverInput, updateServer } from '../src/servers.ts';
 import { deleteStore, listStores, requestStore, retryStore, type StoreSettings } from '../src/stores.ts';
 import { UpstreamPool } from '../src/upstreams.ts';
-import { DATABASE_URL, skip, startUpstream, type Upstream } from './helpers.ts';
+import { DATABASE_URL, fakeApi, skip, startUpstream, type Upstream } from './helpers.ts';
 
 // The provisioner's reconcile logic against real Postgres and a real MCP upstream. Kubernetes and Helm are
 // in-memory fakes here; the real cluster run is documented in the README.
@@ -33,8 +33,11 @@ class FakeKube implements Kube {
     this.namespaces.delete(name);
     for (const k of this.secrets.keys()) if (k.startsWith(`${name}/`)) this.secrets.delete(k);
   }
-  async getSecret(ns: string, name: string) {
-    return this.secrets.get(`${ns}/${name}`) ?? null;
+  async readMcpToken(ns: string) {
+    return this.secrets.get(`${ns}/woocommerce-mcp-auth`)?.MCP_AUTH_TOKEN ?? null;
+  }
+  async allowed() {
+    return false;
   }
   async createSecret(ns: string, name: string, data: Record<string, string>) {
     this.log.push(`secret ${ns}/${name}`);
@@ -373,6 +376,30 @@ describe('stores', { skip }, () => {
     );
     await run(p);
     assert.equal(await store('mid'), undefined);
+  });
+
+  test('through the real Kubernetes client: no Secret is listed, changed, or read except the MCP token', async () => {
+    const api = fakeApi();
+    const kube = kubeClient(api.call, {
+      tenantRole: 'platform-store-tenant',
+      serviceAccount: { name: 'store-provisioner', namespace: 'platform' },
+    });
+    await requestStore(db, settings, root, { name: 'Recorded', slug: 'recorded' });
+    await run(provisioner(kube, new FakeHelm()));
+    const rec = await store('recorded');
+    assert.equal(rec.status, 'ready', rec.status_reason);
+    await deleteStore(db, root, rec.id);
+    await run(provisioner(kube, new FakeHelm()));
+    assert.equal(await store('recorded'), undefined, 'torn down');
+    assert.ok(api.requests.includes('DELETE /api/v1/namespaces/store-recorded'));
+
+    const secrets = [...new Set(api.requests.filter((r) => r.includes('/secrets')))];
+    assert.deepEqual(
+      secrets.filter((r) => !r.startsWith('POST ')),
+      ['GET /api/v1/namespaces/store-recorded/secrets/woocommerce-mcp-auth'],
+      'store-db, store-wp-admin and store-wc-api are created, never read back',
+    );
+    assert.equal(secrets.filter((r) => r.startsWith('POST ')).length, 1, 'created through one collection');
   });
 
   test('delete: tools disappear at once; then registration, release and namespace are removed', async () => {

@@ -8,6 +8,7 @@ import pg from 'pg';
 import type { ChatModel } from '../src/agent.ts';
 import { createGateway } from '../src/app.ts';
 import type { Config } from '../src/config.ts';
+import { KubeError } from '../src/kube.ts';
 
 export const DATABASE_URL = process.env.TEST_DATABASE_URL;
 export const skip = DATABASE_URL ? false : 'TEST_DATABASE_URL not set';
@@ -117,3 +118,37 @@ export async function startGateway(model?: ChatModel) {
 
 export const textOf = (r: { content?: unknown }) => ((r.content as { text?: string }[]) ?? [])[0]?.text ?? '';
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** A tiny Kubernetes API: objects by path; POST to an existing path is 409, GET of a missing one 404. */
+export function fakeApi(seed: Record<string, Record<string, unknown>> = {}) {
+  const objects = new Map(Object.entries(seed));
+  const requests: string[] = [];
+  const call = async (method: string, path: string, body?: unknown) => {
+    requests.push(`${method} ${path}`);
+    const b = (body ?? {}) as { metadata?: { name?: string }; stringData?: Record<string, string> };
+    if (method === 'POST' && path.endsWith('/selfsubjectaccessreviews'))
+      return { status: { allowed: false } };
+    if (method === 'POST') {
+      const target = `${path}/${b.metadata?.name}`;
+      if (objects.has(target)) throw new KubeError(409, `${target} exists`);
+      const data = b.stringData
+        ? Object.fromEntries(
+            Object.entries(b.stringData).map(([k, v]) => [k, Buffer.from(v).toString('base64')]),
+          )
+        : undefined;
+      objects.set(target, { ...(body as object), ...(data ? { data } : {}) });
+      return {};
+    }
+    if (method === 'GET') {
+      const o = objects.get(path);
+      if (!o) throw new KubeError(404, `${path} not found`);
+      return o;
+    }
+    if (method === 'DELETE') {
+      if (!objects.delete(path)) throw new KubeError(404, `${path} not found`);
+      return {};
+    }
+    throw new Error(`unexpected ${method} ${path}`);
+  };
+  return { call, objects, requests };
+}
