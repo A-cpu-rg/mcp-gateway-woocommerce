@@ -1,0 +1,24 @@
+# Production-like VPS (k3s): domain, TLS, storage and image registry change; nothing else.
+host: app.example.com
+ingress:
+  className: traefik
+  tlsSecret: app-tls
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+storageClass: local-path
+gateway:
+  image: ghcr.io/your-org/gateway:1.0.0
+  cookieSecure: true              # HTTPS only
+  replicas: 2
+postgres:
+  storage: 5Gi
+toolbox:
+  image: ghcr.io/your-org/toolbox-mcp:1.0.0
+everything:
+  image: ghcr.io/your-org/everything-mcp:1.0.0
+stores:
+  hostTemplate: "{slug}.store.example.com"   # wildcard DNS: *.store.example.com -> VPS
+  urlScheme: https                           # the store values file (values-prod.yaml) sets ingress.tlsSecret
+provisioner:
+  image: ghcr.io/your-org/store-provisioner:1.0.0
+  storeValuesFile: values-prod.yaml

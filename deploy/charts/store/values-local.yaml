@@ -1,0 +1,8 @@
+# k3d / kind on a laptop. *.localtest.me resolves to 127.0.0.1 via public DNS, k3d maps port 80.
+host: store.localtest.me
+ingress:
+  className: traefik
+  tlsSecret: ""
+woocommerceMcp:
+  image: urumi/woocommerce-mcp:dev
+  pullPolicy: Never     # imported with `k3d image import`

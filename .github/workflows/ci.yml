@@ -1,0 +1,63 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  code:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: gw
+          POSTGRES_PASSWORD: gw
+          POSTGRES_DB: gw
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U gw" --health-interval 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://gw:gw@localhost:5432/gw
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+
+  # Every Dockerfile target, then a smoke check of what the workload needs inside the image (catches a
+  # .dockerignore or COPY mistake, e.g. the store chart missing from the store-provisioner image).
+  images:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { image: gateway, target: gateway, app: gateway }
+          - { image: woocommerce-mcp, target: app, app: woocommerce-mcp }
+          - { image: toolbox-mcp, target: app, app: toolbox-mcp }
+          - { image: everything-mcp, target: everything-mcp, app: "" }
+          - { image: store-provisioner, target: store-provisioner, app: gateway }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: build ${{ matrix.image }}
+        run: >-
+          docker buildx build --load --target ${{ matrix.target }}
+          ${{ matrix.app && format('--build-arg APP={0}', matrix.app) || '' }}
+          -t ci/${{ matrix.image }}:${{ github.sha }} .
+      - run: scripts/image-check.sh ci/${{ matrix.image }}:${{ github.sha }} ${{ matrix.image }}
+
+  charts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: install kubeconform
+        run: curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz | sudo tar xz -C /usr/local/bin kubeconform
+      - run: make charts-check

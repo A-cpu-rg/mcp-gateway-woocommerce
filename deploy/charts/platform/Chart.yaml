@@ -1,0 +1,6 @@
+apiVersion: v2
+name: platform
+description: Team MCP gateway (backend + dashboard + chat agent), its Postgres, and two upstream MCP servers.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

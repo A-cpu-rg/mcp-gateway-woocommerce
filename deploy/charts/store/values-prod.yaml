@@ -1,0 +1,18 @@
+# Production-like VPS (k3s). Only configuration changes: domain, TLS, storage, images.
+host: store.example.com           # set to your DNS name (A record -> VPS IP)
+ingress:
+  className: traefik
+  tlsSecret: store-tls
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+storageClass: local-path          # k3s default; use your cloud's block storage class if available
+mariadb:
+  storage: 10Gi
+wordpress:
+  storage: 10Gi
+quota:
+  storage: 25Gi                   # mariadb 10Gi + wordpress 10Gi + headroom
+woocommerceMcp:
+  image: ghcr.io/your-org/woocommerce-mcp:1.0.0
+  pullPolicy: IfNotPresent
+  replicas: 2

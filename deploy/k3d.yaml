@@ -1,0 +1,14 @@
+# Local cluster: k3s in Docker (same distribution as the VPS: Traefik ingress, local-path storage,
+# built-in NetworkPolicy enforcement). Ports 80/443 on the laptop go to Traefik.
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: urumi
+servers: 1
+agents: 0
+image: rancher/k3s:v1.33.5-k3s1
+ports:
+  - port: 80:80
+    nodeFilters: [loadbalancer]
+  - port: 443:443
+    nodeFilters: [loadbalancer]

@@ -1,0 +1,102 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  labels: {{- include "platform.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  labels: {{- include "platform.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+          podSelector: { matchLabels: { k8s-app: kube-dns } }
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+---
+# Gateway: reachable only through the ingress controller.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gateway
+  labels: {{- include "platform.labels" . | nindent 4 }}
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/name: gateway } }
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: {{ .Values.ingress.controllerNamespace }} } }
+      ports: [{ port: 8080 }]
+  egress:
+    - to: [{ podSelector: { matchLabels: { app.kubernetes.io/name: postgres } } }]
+      ports: [{ port: 5432 }]
+    # In-namespace upstreams (toolbox, everything).
+    - to: [{ podSelector: { matchLabels: { mcp.urumi.io/upstream: "true" } } }]
+      ports: [{ port: 8080 }]
+    # MCP servers in store namespaces: the configured ones and every provisioned store (labelled by the provisioner).
+    - to: [{ namespaceSelector: { matchLabels: { urumi.io/store: "true" } } }]
+      ports: [{ port: 8080 }]
+    {{- range .Values.upstreamNamespaces }}
+    - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: {{ . }} } } }]
+      ports: [{ port: 8080 }]
+    {{- end }}
+    # Public HTTPS (LLM provider, external MCP servers). Cluster ranges and cloud metadata excluded.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10]
+      ports: [{ port: 443 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres
+  labels: {{- include "platform.labels" . | nindent 4 }}
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/name: postgres } }
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: gateway } }
+        - podSelector: { matchLabels: { app.kubernetes.io/name: store-provisioner } }
+      ports: [{ port: 5432 }]
+---
+# Upstream MCP servers: only the gateway may call them, and they get no egress at all
+# (an untrusted/compromised server cannot reach the store, Postgres or the internet).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: upstream-mcp
+  labels: {{- include "platform.labels" . | nindent 4 }}
+spec:
+  podSelector: { matchLabels: { mcp.urumi.io/upstream: "true" } }
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from: [{ podSelector: { matchLabels: { app.kubernetes.io/name: gateway } } }]
+      ports: [{ port: 8080 }]
+  egress: []
+{{- if .Values.ingress.tlsSecret }}
+---
+# cert-manager HTTP-01: for each certificate it starts a solver pod in this namespace and routes
+# /.well-known/acme-challenge/ to it through the ingress controller. Default-deny would block that request,
+# so issuance (and renewal) would fail. Only the ingress controller, only the solver port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: acme-http01-solver
+  labels: {{- include "platform.labels" . | nindent 4 }}
+spec:
+  podSelector: { matchLabels: { acme.cert-manager.io/http01-solver: "true" } }
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: {{ .Values.ingress.controllerNamespace }} } }
+      ports: [{ port: 8089 }]
+{{- end }}

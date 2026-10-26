@@ -1,0 +1,6 @@
+apiVersion: v2
+name: store
+description: One WooCommerce store (WordPress + MariaDB) and its WooCommerce MCP server, in its own namespace.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

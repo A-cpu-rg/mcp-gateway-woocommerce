@@ -147,3 +147,9 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# macOS Finder metadata
+.DS_Store
+
+# The assessment brief (not ours to publish)
+docs/Urumi AI FDE Internship - Round 1_ MCP Gateway on Kubernetes.md

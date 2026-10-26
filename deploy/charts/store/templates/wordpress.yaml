@@ -1,0 +1,94 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: wordpress-content
+  labels: {{- include "store.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep   # store content survives `helm uninstall`
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with .Values.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests: { storage: {{ .Values.wordpress.storage }} }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wordpress
+  labels: {{- include "store.labels" . | nindent 4 }}
+spec:
+  selector: { app.kubernetes.io/name: wordpress }
+  ports: [{ name: http, port: 80, targetPort: 80 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wordpress
+  labels: {{- include "store.labels" . | nindent 4 }}
+    app.kubernetes.io/name: wordpress
+spec:
+  replicas: 1
+  strategy: { type: Recreate }   # ReadWriteOnce volume: never two pods at once
+  selector:
+    matchLabels: { app.kubernetes.io/name: wordpress }
+  template:
+    metadata:
+      labels: {{- include "store.labels" . | nindent 8 }}
+        app.kubernetes.io/name: wordpress
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 33
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: wordpress
+          image: {{ .Values.wordpress.image }}
+          # Apache starts as root to bind :80 and drops to www-data (documented exception to non-root).
+          securityContext:
+            allowPrivilegeEscalation: false
+          env: {{- include "store.wpDbEnv" . | nindent 12 }}
+          ports: [{ name: http, containerPort: 80 }]
+          startupProbe:
+            tcpSocket: { port: http }
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /wp-login.php, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: http }
+            periodSeconds: 20
+            failureThreshold: 3
+          resources: {{- toYaml .Values.wordpress.resources | nindent 12 }}
+          volumeMounts:
+            - { name: content, mountPath: /var/www/html }
+      volumes:
+        - name: content
+          persistentVolumeClaim: { claimName: wordpress-content }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: storefront
+  labels: {{- include "store.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tlsSecret }}
+  tls:
+    - hosts: [{{ .Values.host | quote }}]
+      secretName: {{ .Values.ingress.tlsSecret }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: wordpress, port: { name: http } }
