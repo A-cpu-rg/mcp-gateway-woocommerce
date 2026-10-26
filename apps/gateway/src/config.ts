@@ -69,6 +69,7 @@ export function loadConfig(): Config {
       process.env.STORES_ENABLED === 'true'
         ? {
             hostTemplate: env('STORE_HOST_TEMPLATE', '{slug}.store.localtest.me'),
+            urlScheme: env('STORE_URL_SCHEME', 'http') === 'https' ? 'https' : 'http',
             maxPerUser: Number(env('MAX_STORES_PER_USER', '2')),
             timeoutMs: Number(env('STORE_PROVISION_TIMEOUT_MS', String(15 * 60_000))),
           }

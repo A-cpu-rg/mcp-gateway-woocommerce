@@ -7,9 +7,12 @@ metadata:
   name: store-provisioner
   labels: {{- include "platform.labels" . | nindent 4 }}
 ---
-# What one store needs: its namespace, and the kinds the store chart creates (plus Helm's release Secrets and
-# what `helm --wait` watches). Store namespaces are created at runtime, so this has to be a ClusterRole; the
-# provisioner additionally refuses any namespace outside store-* and never deletes one it did not label.
+# Least privilege. Store namespaces are created at runtime, so the provisioner holds a small cluster-wide role:
+# manage namespaces, and create RoleBindings that may only grant the tenant role below. Everything a store
+# needs inside its namespace comes from that tenant role, which the provisioner binds to itself in each
+# store-<slug> namespace it creates (kube.ts ensureAccess). It has no rights at all in platform, kube-system
+# or any other namespace. The admission policy further down restricts the namespace/RoleBinding writes to
+# store-*; the code also refuses other names and never deletes a namespace it did not label.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -19,6 +22,23 @@ rules:
   - apiGroups: [""]
     resources: [namespaces]
     verbs: [get, list, create, delete]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [rolebindings]
+    verbs: [get, create, delete]
+  # Kubernetes only lets a subject create a RoleBinding to a role it may "bind" (or already holds).
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [clusterroles]
+    verbs: [bind]
+    resourceNames: [{{ .Release.Namespace }}-store-tenant]
+---
+# What one store needs inside its own namespace: the kinds the store chart creates, Helm's release Secrets,
+# and what `helm --wait` watches. Never bound cluster-wide; only through a RoleBinding in a store namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Namespace }}-store-tenant
+  labels: {{- include "platform.labels" . | nindent 4 }}
+rules:
   - apiGroups: [""]
     resources: [secrets, configmaps, services, persistentvolumeclaims, resourcequotas, limitranges]
     verbs: [get, list, watch, create, update, patch, delete]
@@ -48,6 +68,55 @@ subjects:
   - kind: ServiceAccount
     name: store-provisioner
     namespace: {{ .Release.Namespace }}
+{{- if .Values.provisioner.admissionPolicy }}
+---
+# RBAC cannot express "only namespaces named store-*". This policy does: for requests made by the
+# provisioner, namespaces it creates or deletes must be store-*, and RoleBindings may only be created in
+# store-* namespaces, only to the tenant role, and only for the provisioner itself.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ .Release.Namespace }}-store-provisioner
+  labels: {{- include "platform.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE, DELETE]
+        resources: [namespaces]
+      - apiGroups: [rbac.authorization.k8s.io]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE, DELETE]
+        resources: [rolebindings]
+  matchConditions:
+    - name: store-provisioner-only
+      expression: "request.userInfo.username == 'system:serviceaccount:{{ .Release.Namespace }}:store-provisioner'"
+  validations:
+    - expression: >-
+        request.resource.resource != 'namespaces' ||
+        (request.operation == 'DELETE' ? oldObject : object).metadata.name.startsWith('store-')
+      message: the store-provisioner may only create or delete store-* namespaces
+    - expression: "request.resource.resource != 'rolebindings' || request.namespace.startsWith('store-')"
+      message: the store-provisioner may only manage RoleBindings in store-* namespaces
+    - expression: >-
+        request.resource.resource != 'rolebindings' || request.operation == 'DELETE' ||
+        (object.roleRef.kind == 'ClusterRole' &&
+         object.roleRef.name == '{{ .Release.Namespace }}-store-tenant' &&
+         object.subjects.all(s, s.kind == 'ServiceAccount' && s.name == 'store-provisioner' &&
+           s.namespace == '{{ .Release.Namespace }}'))
+      message: the store-provisioner may only bind the store tenant role to itself
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ .Release.Namespace }}-store-provisioner
+  labels: {{- include "platform.labels" . | nindent 4 }}
+spec:
+  policyName: {{ .Release.Namespace }}-store-provisioner
+  validationActions: [Deny]
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -83,6 +152,8 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ .Values.secrets.gateway }}, key: ENCRYPTION_KEY } }
             - { name: DATABASE_URL, value: "postgres://gateway:$(POSTGRES_PASSWORD)@postgres:5432/gateway" }
             - { name: GATEWAY_NAMESPACE, value: {{ .Release.Namespace | quote }} }
+            - { name: SERVICE_ACCOUNT_NAME, value: store-provisioner }
+            - { name: STORE_TENANT_ROLE, value: "{{ .Release.Namespace }}-store-tenant" }
             - { name: STORE_CHART_DIR, value: /app/charts/store }
             - { name: STORE_VALUES_FILE, value: "/app/charts/store/{{ .Values.provisioner.storeValuesFile }}" }
             - { name: PROVISION_CONCURRENCY, value: {{ .Values.stores.concurrency | quote }} }
@@ -114,7 +185,8 @@ spec:
   egress:
     - to: [{ podSelector: { matchLabels: { app.kubernetes.io/name: postgres } } }]
       ports: [{ port: 5432 }]
-    # The Kubernetes API server. Its address depends on the cluster (k3s: node IP :6443; service :443).
-    - to: [{ ipBlock: { cidr: {{ .Values.provisioner.apiServerCidr | quote }} } }]
+    # The Kubernetes API server only. Policies see the address after the Service is resolved, i.e. the API
+    # server's endpoint (k3s: the node IP, port 6443). `make deploy-*` passes it from the EndpointSlice.
+    - to: [{ ipBlock: { cidr: {{ required "provisioner.apiServerCidr: the API server endpoint, e.g. 172.20.0.3/32 (kubectl get endpointslice -l kubernetes.io/service-name=kubernetes)" .Values.provisioner.apiServerCidr | quote }} } }]
       ports: [{ port: 443 }, { port: 6443 }]
 {{- end }}

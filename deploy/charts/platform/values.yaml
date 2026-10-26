@@ -38,6 +38,8 @@ gateway:
 stores:
   enabled: true
   hostTemplate: "{slug}.store.localtest.me"
+  # Scheme of the store URLs the dashboard shows: "https" when the store values file sets ingress.tlsSecret.
+  urlScheme: http
   maxPerUser: 2
   timeoutMinutes: 15
   concurrency: 3
@@ -46,7 +48,12 @@ provisioner:
   image: urumi/store-provisioner:dev
   pullPolicy: IfNotPresent
   storeValuesFile: values-local.yaml   # which store chart values file new stores use
-  apiServerCidr: 0.0.0.0/0             # narrow to your API server address if known (k3s: node IP/32)
+  # Required: the provisioner may reach only this address (the API server endpoint, e.g. node IP/32 on k3s).
+  # `make deploy-local` / `deploy-prod` read it from the cluster; no default, so it is never open to the internet.
+  apiServerCidr: ""
+  # ValidatingAdmissionPolicy (Kubernetes >= 1.30) that limits the provisioner's namespace and RoleBinding
+  # writes to store-* namespaces. RBAC cannot restrict by name prefix, so this closes that gap.
+  admissionPolicy: true
   resources:
     requests: { cpu: 50m, memory: 96Mi }
     limits: { cpu: 500m, memory: 256Mi }

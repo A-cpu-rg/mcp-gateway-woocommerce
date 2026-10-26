@@ -3,7 +3,7 @@ import type { Db } from './db.ts';
 import type { Helm, Kube } from './kube.ts';
 import { createServer } from './servers.ts';
 import { type StoreRow, storeServerSlug } from './stores.ts';
-import type { UpstreamPool } from './upstreams.ts';
+import type { ServerRow, UpstreamPool } from './upstreams.ts';
 
 // Reconciles the stores table towards the cluster. Every step is idempotent (create-if-missing,
 // helm upgrade --install, register-if-missing), so a store can be retried, and a provisioner that restarts
@@ -24,6 +24,10 @@ export interface ProvisionerDeps {
   leaseMs: number;
   /** Wait before retrying a step that failed transiently. */
   backoffMs: number;
+  /** How long one pass waits for the gateway to report the store's MCP server connected (default 60 s). */
+  connectWaitMs?: number;
+  /** How often it checks while waiting (default 2 s). */
+  pollMs?: number;
   /** Where a store's MCP server is reached (tests point this at a local server). */
   storeMcpUrl?: (namespace: string) => string;
 }
@@ -137,6 +141,7 @@ export class Provisioner {
     }
     if (ns?.terminating) throw new Error(`namespace ${row.namespace} is still terminating`);
     if (!ns) await kube.createNamespace(row.namespace, { [LABEL_STORE]: 'true', [LABEL_STORE_ID]: row.id });
+    await kube.ensureAccess(row.namespace);
     const owner = (await db.query<{ email: string }>('SELECT email FROM users WHERE id = $1', [row.owner_id]))
       .rows[0];
     // Same Secrets as scripts/create-secrets.sh creates for the first store; never overwritten.
@@ -158,19 +163,40 @@ export class Provisioner {
     if (!token) throw new Error('MCP token Secret is missing');
 
     await this.#step(row, 'Installing WordPress, MariaDB and WooCommerce (Helm)');
-    const status = await helm.status(row.namespace);
-    // A provisioner killed during "helm upgrade" leaves the release locked in a pending state. Volumes are
-    // kept (StatefulSet PVCs, resource-policy: keep), so removing the half-finished release is safe.
-    if (status?.startsWith('pending')) await helm.uninstall(row.namespace);
-    await helm.upgradeInstall(
-      row.namespace,
-      { host: row.host, 'store.title': row.name, 'gateway.namespace': this.#d.gatewayNamespace },
-      (row.deadline_at.getTime() - Date.now()) / 1000,
-    );
-
-    await this.#step(row, 'Registering the store MCP server in the gateway');
     const slug = storeServerSlug(row.slug);
     let server = await this.#d.pool.serverBySlug(slug);
+    // The registration grants the store owner its admin-only tools, so never adopt one made for anything else.
+    const foreign = () =>
+      new PermanentError(`gateway server ${slug} already exists and does not belong to this store`);
+    if (server && server.store_id !== row.id) throw foreign();
+    const status = await helm.status(row.namespace);
+    // Installed and registered by an earlier pass that only ran out of time waiting for the gateway: go
+    // straight back to waiting rather than adding another Helm revision.
+    if (status !== 'deployed' || server?.store_id !== row.id) {
+      // A provisioner killed during "helm upgrade" leaves the release locked in a pending state. Volumes are
+      // kept (StatefulSet PVCs, resource-policy: keep), so removing the half-finished release is safe.
+      if (status?.startsWith('pending')) await helm.uninstall(row.namespace);
+      await helm.upgradeInstall(
+        row.namespace,
+        { host: row.host, 'store.title': row.name, 'gateway.namespace': this.#d.gatewayNamespace },
+        (row.deadline_at.getTime() - Date.now()) / 1000,
+      );
+    }
+
+    await this.#step(row, 'Registering the store MCP server in the gateway');
+    // Deleted while Helm was running: registering now would expose a deleting store's tools until teardown.
+    const { rows: now } = await db.query<{ status: string }>('SELECT status FROM stores WHERE id = $1', [
+      row.id,
+    ]);
+    if (now[0]?.status !== 'provisioning') {
+      // Release the lease so teardown can start on the next pass.
+      await db.query('UPDATE stores SET lease_until = NULL WHERE id = $1 AND lease_owner = $2', [
+        row.id,
+        this.#d.id,
+      ]);
+      console.log(JSON.stringify({ msg: 'store no longer provisioning, not registering', store: row.slug }));
+      return;
+    }
     if (!server) {
       try {
         server = await createServer(
@@ -193,13 +219,11 @@ export class Provisioner {
       }
     }
     if (!server) throw new Error('gateway registration not found');
-    // The registration grants the store owner its admin-only tools, so never adopt one made for anything else.
-    if (server.store_id !== row.id) {
-      throw new PermanentError(`gateway server ${slug} already exists and does not belong to this store`);
-    }
+    if (server.store_id !== row.id) throw foreign(); // a concurrent registration by something else
     // Only the gateway may call a store's MCP server (NetworkPolicy), so the provisioner does not connect to
     // it; it waits for the gateway's health check (every replica runs one) to report the server connected.
     await this.#step(row, 'Waiting for the gateway to connect to the store MCP server');
+    server = await this.#waitConnected(row, slug, server);
     if (server.status !== 'connected') {
       throw new Error(
         `gateway reports the store MCP server as ${server.status}${server.last_error ? `: ${server.last_error}` : ''}`,
@@ -215,15 +239,31 @@ export class Provisioner {
     console.log(JSON.stringify({ msg: 'store ready', store: row.slug, tools: `${slug}__*` }));
   }
 
+  /**
+   * The gateway's health check (every replica, every 10 s) moves a new server to "connected". Poll for it within
+   * this pass: failing the pass instead would back off and re-run every step. Bounded by the store's deadline.
+   */
+  async #waitConnected(row: StoreRow, slug: string, server: ServerRow): Promise<ServerRow> {
+    const until = Math.min(Date.now() + (this.#d.connectWaitMs ?? 60_000), row.deadline_at.getTime());
+    let current = server;
+    while (current.status !== 'connected' && Date.now() < until) {
+      await new Promise((r) => setTimeout(r, this.#d.pollMs ?? 2_000));
+      current = (await this.#d.pool.serverBySlug(slug)) ?? current;
+    }
+    return current;
+  }
+
   async #teardown(row: StoreRow): Promise<void> {
     const { kube, helm, db } = this.#d;
     await this.#step(row, 'Removing gateway registration');
-    await db.query('DELETE FROM upstream_servers WHERE slug = $1', [storeServerSlug(row.slug)]);
+    await db.query('DELETE FROM upstream_servers WHERE store_id = $1', [row.id]);
 
     const ns = await kube.getNamespace(row.namespace);
     // Never delete a namespace this store did not create.
     if (ns && ns.labels[LABEL_STORE_ID] === row.id) {
       if (!ns.terminating) {
+        // Stores provisioned before per-namespace RoleBindings existed get theirs here.
+        await kube.ensureAccess(row.namespace);
         await this.#step(row, 'Uninstalling the Helm release');
         await helm.uninstall(row.namespace);
         await this.#step(row, 'Deleting namespace (volumes, Secrets, Ingress)');

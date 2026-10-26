@@ -28,7 +28,10 @@ await migrate(db);
 const pool = new UpstreamPool(db, key, createGuardedFetch(allowedHosts));
 const provisioner = new Provisioner({
   db,
-  kube: inClusterKube(),
+  kube: inClusterKube({
+    tenantRole: env('STORE_TENANT_ROLE'),
+    serviceAccount: { name: env('SERVICE_ACCOUNT_NAME'), namespace: env('GATEWAY_NAMESPACE') },
+  }),
   helm: helmCli({ chartDir: env('STORE_CHART_DIR'), valuesFile: env('STORE_VALUES_FILE') }),
   pool,
   key,

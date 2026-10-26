@@ -24,6 +24,7 @@ const OUTCOMES = [
   'not_found',
   'auth_rejected',
   'busy',
+  'pending', // in flight, or the gateway stopped mid-call (outcome unknown)
 ];
 
 export function Audit({ me }: { me: Me }) {

@@ -1,5 +1,8 @@
 import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Agent, fetch as undiciFetch } from 'undici';
 
 // The two things the store-provisioner does to the cluster, behind small interfaces so the reconcile logic
@@ -12,6 +15,17 @@ export interface Kube {
   getSecret(namespace: string, name: string): Promise<Record<string, string> | null>;
   /** Creates the Secret unless it exists; an existing Secret is never overwritten. */
   createSecret(namespace: string, name: string, data: Record<string, string>): Promise<void>;
+  /**
+   * Binds the provisioner to its namespaced rights inside one store namespace (RoleBinding to the tenant
+   * ClusterRole). It holds no such rights cluster-wide, so this runs before anything else in the namespace.
+   */
+  ensureAccess(namespace: string): Promise<void>;
+}
+
+/** Who the provisioner is, and the ClusterRole it binds itself to inside each store namespace. */
+export interface KubeAccess {
+  tenantRole: string;
+  serviceAccount: { name: string; namespace: string };
 }
 
 export interface Helm {
@@ -37,7 +51,7 @@ export class KubeError extends Error {
 const SA = '/var/run/secrets/kubernetes.io/serviceaccount';
 
 /** Kubernetes REST client authenticated with the pod's ServiceAccount token. */
-export function inClusterKube(): Kube {
+export function inClusterKube(access: KubeAccess): Kube {
   const base = `https://${process.env.KUBERNETES_SERVICE_HOST}:${process.env.KUBERNETES_SERVICE_PORT}`;
   const dispatcher = new Agent({ connect: { ca: readFileSync(`${SA}/ca.crt`) } });
 
@@ -108,7 +122,64 @@ export function inClusterKube(): Kube {
         if (!exists(err)) throw err;
       });
     },
+    async ensureAccess(namespace) {
+      assertStoreNamespace(namespace);
+      await call('POST', `/apis/rbac.authorization.k8s.io/v1/namespaces/${namespace}/rolebindings`, {
+        metadata: {
+          name: 'store-provisioner',
+          labels: { 'app.kubernetes.io/managed-by': 'store-provisioner' },
+        },
+        roleRef: { apiGroup: 'rbac.authorization.k8s.io', kind: 'ClusterRole', name: access.tenantRole },
+        subjects: [{ kind: 'ServiceAccount', ...access.serviceAccount }],
+      }).catch((err) => {
+        if (!exists(err)) throw err;
+      });
+    },
   };
+}
+
+/** Dotted keys ("store.title") to the nested object a Helm values file holds. Values stay literal strings. */
+export function nestValues(set: Record<string, string>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(set)) {
+    const parts = key.split('.');
+    let node = out;
+    for (const part of parts.slice(0, -1)) {
+      node[part] ??= {};
+      node = node[part] as Record<string, unknown>;
+    }
+    node[parts[parts.length - 1] as string] = value;
+  }
+  return out;
+}
+
+/**
+ * Arguments for `helm upgrade --install`. Per-store values come only from a values file: --set and
+ * --set-string split on "," and "=", so a store name such as "Shop,host=app.example.com" would otherwise set
+ * other chart values (the Ingress host, container images, quotas).
+ */
+export function helmUpgradeArgs(
+  opts: { chartDir: string; valuesFile: string },
+  namespace: string,
+  storeValuesFile: string,
+  timeoutSeconds: number,
+): string[] {
+  const seconds = Math.max(60, Math.floor(timeoutSeconds));
+  return [
+    'upgrade',
+    '--install',
+    'store',
+    opts.chartDir,
+    '-n',
+    namespace,
+    '-f',
+    opts.valuesFile,
+    '-f',
+    storeValuesFile,
+    '--wait',
+    '--timeout',
+    `${seconds}s`,
+  ];
 }
 
 /** Runs the helm CLI (in-cluster config) against the store chart. Release name is "store" in every namespace. */
@@ -132,25 +203,15 @@ export function helmCli(opts: { chartDir: string; valuesFile: string }): Helm {
     },
     async upgradeInstall(namespace, set, timeoutSeconds) {
       assertStoreNamespace(namespace);
-      const sets = Object.entries(set).flatMap(([k, v]) => ['--set-string', `${k}=${v}`]);
-      const seconds = Math.max(60, Math.floor(timeoutSeconds));
-      await helm(
-        [
-          'upgrade',
-          '--install',
-          'store',
-          opts.chartDir,
-          '-n',
-          namespace,
-          '-f',
-          opts.valuesFile,
-          ...sets,
-          '--wait',
-          '--timeout',
-          `${seconds}s`,
-        ],
-        (seconds + 30) * 1000,
-      );
+      const dir = await mkdtemp(join(tmpdir(), 'store-values-'));
+      const file = join(dir, 'values.json'); // JSON is valid YAML
+      try {
+        await writeFile(file, JSON.stringify(nestValues(set)), { mode: 0o600 });
+        const args = helmUpgradeArgs(opts, namespace, file, timeoutSeconds);
+        await helm(args, (Math.max(60, Math.floor(timeoutSeconds)) + 30) * 1000);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
     },
     async uninstall(namespace) {
       assertStoreNamespace(namespace);

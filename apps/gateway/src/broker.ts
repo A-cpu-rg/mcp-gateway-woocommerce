@@ -22,23 +22,30 @@ export interface AuditEntry {
   error?: string;
 }
 
+/** Inserts an audit row and returns its id. Throws when the database does. */
+async function insertAudit(db: Db, a: AuditEntry): Promise<string> {
+  const { rows } = await db.query<{ id: string }>(
+    `INSERT INTO audit_log (user_id, user_email, api_key_id, channel, server_slug, tool, duration_ms, outcome, error)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+    [
+      a.principal.userId,
+      a.principal.email,
+      a.principal.apiKeyId ?? null,
+      a.channel,
+      a.serverSlug,
+      a.tool,
+      a.durationMs,
+      a.outcome,
+      a.error?.slice(0, 500) ?? null,
+    ],
+  );
+  return rows[0]?.id as string;
+}
+
+/** Best effort: for rejected attempts, where nothing reached an upstream. */
 export async function writeAudit(db: Db, a: AuditEntry): Promise<void> {
   try {
-    await db.query(
-      `INSERT INTO audit_log (user_id, user_email, api_key_id, channel, server_slug, tool, duration_ms, outcome, error)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [
-        a.principal.userId,
-        a.principal.email,
-        a.principal.apiKeyId ?? null,
-        a.channel,
-        a.serverSlug,
-        a.tool,
-        a.durationMs,
-        a.outcome,
-        a.error?.slice(0, 500) ?? null,
-      ],
-    );
+    await insertAudit(db, a);
   } catch (err) {
     console.error(
       JSON.stringify({
@@ -156,8 +163,48 @@ export class Broker {
       await audit(row.slug, tool.name, 'denied', msg);
       return denied(msg);
     }
+    // Audited before the call reaches the upstream: a call that cannot be recorded is not made, and if the
+    // gateway dies mid-call the row stays "pending" (outcome unknown), so every side effect leaves a trace.
+    let auditId: string;
+    try {
+      auditId = await insertAudit(this.#db, {
+        principal: p,
+        channel,
+        serverSlug: row.slug,
+        tool: tool.name,
+        durationMs: 0,
+        outcome: 'pending',
+      });
+    } catch (err) {
+      console.error(
+        JSON.stringify({
+          msg: 'audit write failed, call refused',
+          error: String(err),
+          user: p.userId,
+          tool: exposedName,
+        }),
+      );
+      return denied(`The audit log is unavailable, so '${exposedName}' was not called. Try again shortly.`);
+    }
     const res = await this.#pool.call(row, tool.name, args, signal);
-    await audit(row.slug, tool.name, res.outcome, res.error);
+    try {
+      await this.#db.query('UPDATE audit_log SET duration_ms = $2, outcome = $3, error = $4 WHERE id = $1', [
+        auditId,
+        Math.round(performance.now() - started),
+        res.outcome,
+        res.error?.slice(0, 500) ?? null,
+      ]);
+    } catch (err) {
+      // The row already records the attempt; only its outcome is missing.
+      console.error(
+        JSON.stringify({
+          msg: 'audit outcome write failed',
+          error: String(err),
+          auditId,
+          outcome: res.outcome,
+        }),
+      );
+    }
     return res.result;
   }
 }

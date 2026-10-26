@@ -325,7 +325,11 @@ export class UpstreamPool {
           `Result from '${row.slug}' exceeded ${MAX_RESULT_BYTES} bytes and was dropped.`,
         );
       }
-      return { outcome: result.isError ? 'tool_error' : 'ok', result };
+      if (!result.isError) return { outcome: 'ok', result };
+      // Why the tool failed, for the audit log (results themselves are never stored).
+      const text = (result.content ?? []).find((c) => c.type === 'text') as { text?: string } | undefined;
+      const error = (text?.text ?? 'tool returned an error').replace(/Bearer\s+\S+/gi, 'Bearer ***');
+      return { outcome: 'tool_error', result, error: error.slice(0, 300) };
     } catch (err) {
       if (timeout.signal.aborted) {
         return fail(

@@ -44,6 +44,7 @@ spec:
             - { name: HEALTH_INTERVAL_MS, value: {{ .Values.gateway.healthIntervalMs | quote }} }
             - { name: STORES_ENABLED, value: {{ .Values.stores.enabled | quote }} }
             - { name: STORE_HOST_TEMPLATE, value: {{ .Values.stores.hostTemplate | quote }} }
+            - { name: STORE_URL_SCHEME, value: {{ .Values.stores.urlScheme | quote }} }
             - { name: MAX_STORES_PER_USER, value: {{ .Values.stores.maxPerUser | quote }} }
             - { name: STORE_PROVISION_TIMEOUT_MS, value: {{ mul .Values.stores.timeoutMinutes 60000 | quote }} }
           envFrom:

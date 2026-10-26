@@ -5,7 +5,8 @@ import type { Principal } from '../src/auth.ts';
 import { createDb, type Db, migrate } from '../src/db.ts';
 import { assertStoreNamespace, type Helm, type Kube } from '../src/kube.ts';
 import { Provisioner } from '../src/provisioner.ts';
-import { deleteStore, requestStore, retryStore, type StoreSettings } from '../src/stores.ts';
+import { assertNotStoreServer, serverInput, updateServer } from '../src/servers.ts';
+import { deleteStore, listStores, requestStore, retryStore, type StoreSettings } from '../src/stores.ts';
 import { UpstreamPool } from '../src/upstreams.ts';
 import { DATABASE_URL, skip, startUpstream, type Upstream } from './helpers.ts';
 
@@ -15,6 +16,13 @@ import { DATABASE_URL, skip, startUpstream, type Upstream } from './helpers.ts';
 class FakeKube implements Kube {
   namespaces = new Map<string, { labels: Record<string, string>; terminating: boolean }>();
   secrets = new Map<string, Record<string, string>>();
+  /** Namespaces the provisioner bound itself into, and every step in order (to check what came first). */
+  access = new Set<string>();
+  log: string[] = [];
+  async ensureAccess(ns: string) {
+    this.access.add(ns);
+    this.log.push(`access ${ns}`);
+  }
   async getNamespace(name: string) {
     return this.namespaces.get(name) ?? null;
   }
@@ -29,6 +37,7 @@ class FakeKube implements Kube {
     return this.secrets.get(`${ns}/${name}`) ?? null;
   }
   async createSecret(ns: string, name: string, data: Record<string, string>) {
+    this.log.push(`secret ${ns}/${name}`);
     if (!this.secrets.has(`${ns}/${name}`)) this.secrets.set(`${ns}/${name}`, data);
   }
 }
@@ -53,6 +62,7 @@ class FakeHelm implements Helm {
 
 const settings: StoreSettings = {
   hostTemplate: '{slug}.store.localtest.me',
+  urlScheme: 'http',
   maxPerUser: 2,
   timeoutMs: 60_000,
 };
@@ -68,10 +78,12 @@ describe('stores', { skip }, () => {
   const key = randomBytes(32);
   const pools: UpstreamPool[] = [];
 
-  function provisioner(kube: Kube, helm: Helm, id = 'p1') {
+  function provisioner(kube: Kube, helm: Helm, id = 'p1', connectWaitMs = 2_000) {
     const pool = new UpstreamPool(db, key, fetch);
     pools.push(pool);
     return new Provisioner({
+      connectWaitMs,
+      pollMs: 20,
       db,
       kube,
       helm,
@@ -87,21 +99,37 @@ describe('stores', { skip }, () => {
     });
   }
   /**
-   * Provisioner passes until nothing is pending (the real loop runs every 5 s). Between passes, a gateway
-   * replica health-checks registered servers: the provisioner itself is not allowed to call them.
+   * Provisioner passes until nothing is pending (the real loop runs every 5 s). Meanwhile a gateway replica
+   * health-checks registered servers, as every replica does every 10 s: the provisioner itself is not allowed
+   * to call them. `between: true` checks only between passes, so a pass can run out of time waiting.
    */
-  async function run(p: Provisioner) {
+  async function run(p: Provisioner, opts: { between?: boolean } = {}) {
     const gateway = new UpstreamPool(db, key, fetch);
     pools.push(gateway);
-    for (let pass = 0; pass < 6; pass++) {
-      await Promise.all(await p.tick());
+    const checkAll = async () => {
       for (const row of await gateway.servers()) if (row.enabled) await gateway.check(row);
-      const { rowCount } = await db.query(
-        `UPDATE stores SET lease_until = NULL
-         WHERE status IN ('provisioning', 'deleting') AND (lease_owner IS NULL OR lease_owner = $1)`,
-        [p.id],
-      );
-      if (!rowCount) return;
+    };
+    let checking = !opts.between;
+    const checker = (async () => {
+      while (checking) {
+        await checkAll();
+        await new Promise((r) => setTimeout(r, 25));
+      }
+    })();
+    try {
+      for (let pass = 0; pass < 6; pass++) {
+        await Promise.all(await p.tick());
+        if (opts.between) await checkAll();
+        const { rowCount } = await db.query(
+          `UPDATE stores SET lease_until = NULL
+           WHERE status IN ('provisioning', 'deleting') AND (lease_owner IS NULL OR lease_owner = $1)`,
+          [p.id],
+        );
+        if (!rowCount) return;
+      }
+    } finally {
+      checking = false;
+      await checker;
     }
   }
   const store = async (slug: string) =>
@@ -172,6 +200,10 @@ describe('stores', { skip }, () => {
     for (const s of ['store-db', 'store-wp-admin', 'store-wc-api', 'woocommerce-mcp-auth'])
       assert.ok(kube.secrets.has(`store-acme/${s}`), s);
     assert.ok(helm.calls.includes('install store-acme host=acme.store.localtest.me'));
+    assert.equal(helm.calls.filter((c) => c.startsWith('install store-acme')).length, 1, 'installed once');
+    // The provisioner has no rights in a namespace until it binds itself there, so that comes first.
+    assert.ok(kube.access.has('store-acme'));
+    assert.ok(kube.log.indexOf('access store-acme') < kube.log.indexOf('secret store-acme/store-db'));
     const srv = await server('store-acme');
     assert.equal(srv.status, 'connected');
     assert.equal(srv.auth_type, 'bearer');
@@ -180,6 +212,19 @@ describe('stores', { skip }, () => {
     assert.equal(srv.store_id, acme.id, 'linked to its store: the owner may use the admin-only tools');
     // Several stores were provisioned in the same tick.
     assert.equal((await store('beta')).status, 'ready');
+  });
+
+  test('a pass that runs out of time waiting for the gateway resumes without installing again', async () => {
+    await requestStore(db, settings, root, { name: 'Slow', slug: 'slow' });
+    const helm = new FakeHelm();
+    // Nothing health-checks during a pass and each pass waits only 30 ms, so the first pass gives up waiting.
+    await run(provisioner(new FakeKube(), helm, 'p1', 30), { between: true });
+    assert.equal((await store('slow')).status, 'ready');
+    assert.deepEqual(
+      helm.calls.filter((c) => c.includes('store-slow')),
+      ['install store-slow host=slow.store.localtest.me'],
+      'one Helm revision, not one per wait',
+    );
   });
 
   test('a restart mid-provisioning resumes: expired lease is taken over, a locked Helm release is cleared', async () => {
@@ -264,6 +309,72 @@ describe('stores', { skip }, () => {
     await db.query("DELETE FROM stores WHERE slug = 'squat'");
   });
 
+  test('store URLs use the configured scheme (https when the store chart terminates TLS)', async () => {
+    const https = { ...settings, urlScheme: 'https' as const };
+    const listed = (await listStores(db, https, root)).find((s) => s.slug === 'slow');
+    assert.equal(listed?.url, 'https://slow.store.localtest.me');
+    assert.equal(
+      (await listStores(db, settings, root)).find((s) => s.slug === 'slow')?.url,
+      'http://slow.store.localtest.me',
+    );
+  });
+
+  test("a store's registration follows the store: no rename or removal through the API, teardown by link", async () => {
+    const srv = await server('store-slow');
+    const slow = await store('slow');
+    const deps = { db, pool: new UpstreamPool(db, key, fetch), key, allowedHosts: ['127.0.0.1'] };
+    pools.push(deps.pool);
+    const edit = (slug: string) =>
+      serverInput.parse({
+        slug,
+        name: srv.name,
+        url: srv.url,
+        authType: 'bearer',
+        adminOnlyTools: srv.admin_only_tools,
+      });
+    await assert.rejects(
+      updateServer(deps, srv.id, edit('renamed')),
+      /belongs to store "slow": its name follows/,
+    );
+    await assert.rejects(assertNotStoreServer(db, srv.id, 'removed'), /delete the store to remove it/);
+    // Everything except the name stays editable.
+    assert.equal(
+      (await updateServer(deps, srv.id, { ...edit('store-slow'), timeoutMs: 5000 }))?.timeout_ms,
+      5000,
+    );
+
+    // Even a registration renamed directly in the database is found by its store link: disabled at once on
+    // delete, removed by teardown, never left behind enabled (it would keep the store's tools visible).
+    await db.query("UPDATE upstream_servers SET slug = 'renamed-by-hand' WHERE id = $1", [srv.id]);
+    await deleteStore(db, root, slow.id);
+    assert.equal((await server('renamed-by-hand')).enabled, false, 'disabled by store link, not slug');
+    await run(provisioner(new FakeKube(), new FakeHelm()));
+    assert.equal(await store('slow'), undefined);
+    assert.equal(await server('renamed-by-hand'), undefined, 'teardown removed the linked registration');
+  });
+
+  test('a store deleted while Helm runs is never registered, and is torn down', async () => {
+    await requestStore(db, settings, root, { name: 'Mid', slug: 'mid' });
+    const mid = await store('mid');
+    // The owner deletes the store while `helm upgrade` is still running.
+    class DeletedDuringHelm extends FakeHelm {
+      async upgradeInstall(ns: string, set: Record<string, string>) {
+        await super.upgradeInstall(ns, set);
+        await deleteStore(db, root, mid.id);
+      }
+    }
+    const p = provisioner(new FakeKube(), new DeletedDuringHelm());
+    await Promise.all(await p.tick());
+    assert.equal(await server('store-mid'), undefined, 'a deleting store gets no registration (no tools)');
+    assert.equal(
+      (await store('mid')).lease_until,
+      null,
+      'lease released so teardown starts on the next pass',
+    );
+    await run(p);
+    assert.equal(await store('mid'), undefined);
+  });
+
   test('delete: tools disappear at once; then registration, release and namespace are removed', async () => {
     const kube = new FakeKube();
     const helm = new FakeHelm();
@@ -277,7 +388,9 @@ describe('stores', { skip }, () => {
     await assert.rejects(deleteStore(db, bob, acme.id), /not your store/);
     await deleteStore(db, alice, acme.id);
     assert.equal((await server('store-acme')).enabled, false, 'tools are hidden before teardown starts');
+    kube.access.clear();
     await run(provisioner(kube, helm));
+    assert.ok(kube.access.has('store-acme'), 'teardown binds access first (stores from before RoleBindings)');
     assert.equal(await server('store-acme'), undefined, 'registration removed');
     assert.ok(helm.calls.includes('uninstall store-acme'));
     assert.equal(kube.namespaces.has('store-acme'), false, 'namespace (volumes, Secrets) removed');

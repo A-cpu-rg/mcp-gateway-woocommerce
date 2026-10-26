@@ -18,6 +18,7 @@ everything:
   image: ghcr.io/your-org/everything-mcp:1.0.0
 stores:
   hostTemplate: "{slug}.store.example.com"   # wildcard DNS: *.store.example.com -> VPS
+  urlScheme: https                           # the store values file (values-prod.yaml) sets ingress.tlsSecret
 provisioner:
   image: ghcr.io/your-org/store-provisioner:1.0.0
   storeValuesFile: values-prod.yaml

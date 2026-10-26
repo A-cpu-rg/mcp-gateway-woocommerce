@@ -44,7 +44,8 @@ Claude Code ──POST /mcp  tools/call woocommerce__list_orders  (Authorization
              socket address checked by the SSRF guard), AbortSignal with the server's timeout
 woocommerce-mcp  bearer check → zod validation → GET http://wordpress.store.svc/wp-json/wc/v3/orders?after=…
              signed with OAuth 1.0a (consumer key from its own Secret) → WordPress → MariaDB
- broker.ts   result size cap (512 KB), audit row {user, key, channel, server, tool, duration, outcome}
+ broker.ts   (before the call: audit row {user, key, channel, server, tool} as "pending"; no row, no call)
+             result size cap (512 KB), then the row gets {duration, outcome, error}
 ◀── result to Claude Code
 ```
 
@@ -77,6 +78,7 @@ audit are identical; the model is only offered tools that user may call.
 | Huge result | Dropped above 512 KB with an explanation; chat agent truncates tool output to 12 K chars |
 | Gateway readiness | Depends only on Postgres. A dead upstream never takes the gateway out of the Service |
 | Disabled server | Checked from Postgres on every list and call, so it takes effect immediately on every replica |
+| Audit log unavailable | A call that reaches an upstream is recorded as `pending` first; if that insert fails the call is refused (*"the audit log is unavailable, so … was not called"*), so no side effect goes unaudited. The outcome is written afterwards; a row left `pending` means the gateway stopped mid-call (outcome unknown). Rejected attempts (denied, not found, revoked key) are audited best effort, since nothing ran |
 
 ## Persistence
 
@@ -140,7 +142,7 @@ store-provisioner (own ServiceAccount) ──┘ claims work (FOR UPDATE SKIP LO
 
 | Concern | How |
 |---|---|
-| Who has cluster credentials | Only the store-provisioner (no Service, no Ingress, NetworkPolicy allows no ingress). The internet-facing gateway has none; it only writes rows. RBAC: namespaces + the kinds the store chart creates. It must be a ClusterRole because namespaces are created at runtime; the code also refuses any namespace outside `store-*` and never deletes a namespace it did not label with the store's id |
+| Who has cluster credentials | Only the store-provisioner (no Service, no Ingress, NetworkPolicy allows no ingress). The internet-facing gateway has none; it only writes rows. RBAC: cluster-wide only namespaces and RoleBindings to one tenant role, which it binds to itself in each store namespace it creates; an admission policy limits those writes to `store-*` (migration below). The code also refuses any namespace outside `store-*` and never deletes a namespace it did not label with the store's id |
 | Several at once | Concurrency 3 per provisioner; each store is leased individually |
 | Safe to retry | Create with the same slug returns the existing store; every step is create-if-missing or `helm upgrade --install` |
 | Provisioner restarts mid-way | Its lease expires and the next provisioner re-runs the steps; a Helm release left `pending-*` is uninstalled first (volumes are kept) |
@@ -148,7 +150,34 @@ store-provisioner (own ServiceAccount) ──┘ claims work (FOR UPDATE SKIP LO
 | Not reachable except by the gateway | Unchanged store chart NetworkPolicies; the gateway's egress admits any namespace labelled `urumi.io/store=true`. The provisioner does not call store MCP servers either: it waits for the gateway's health check to report the server connected |
 | Isolation | Each store's MCP server reaches only its own WordPress; its WordPress only its own MariaDB (verified with probes across stores) |
 | Guardrails | ResourceQuota + LimitRange in every store namespace, 2 stores per user (checked under a per-user advisory lock), 15 min deadline |
-| Teardown | Server disabled immediately (tools gone for every client), then registration deleted, `helm uninstall`, namespace deleted (PVCs, Secrets, Ingress), row removed once the namespace is gone |
+| Teardown | Server disabled immediately (tools gone for every client), then registration deleted (both matched by the store link `store_id`, not the name; admins cannot rename or remove a store's registration through the API, 409), `helm uninstall`, namespace deleted (PVCs, Secrets, Ingress), row removed once the namespace is gone |
+
+Waiting for the gateway: the provisioner never calls a store's MCP server itself, so after registering it
+polls (every 2 s, up to 60 s per pass) for a gateway replica's health check to report the server connected.
+A pass that runs out of time is retried, and a retry with the release already `deployed` and the server
+registered goes straight back to waiting instead of running `helm upgrade` again.
+
+### Provisioner RBAC migration
+
+Clusters installed from a chart version before least-privilege RBAC run a provisioner with cluster-wide
+rights over Secrets and workloads. The new provisioner image and the new chart must ship together: the
+image needs the chart's `STORE_TENANT_ROLE` / `SERVICE_ACCOUNT_NAME` env and its RoleBinding rights, and
+the old image never creates RoleBindings, so it cannot work under the new RBAC. Not applied automatically:
+
+1. Wait until no store is Provisioning or Deleting (Dashboard → Stores).
+2. Build the new images (`make images import`, or push a new version tag), then in the same step
+   `make deploy-local` / `make deploy-prod` (it passes the now required `provisioner.apiServerCidr`). The
+   upgrade replaces the ClusterRole, adds `<ns>-store-tenant` and the admission policy, and restarts the
+   provisioner (strategy `Recreate`, so old and new never overlap) and the gateway (rolling; it applies
+   migration `003_server_store.sql` on start).
+3. Ready stores are not reconciled, so their namespaces get the RoleBinding only when they are deleted. To
+   bind them up front:
+   `kubectl -n store-<slug> create rolebinding store-provisioner --clusterrole=platform-store-tenant --serviceaccount=platform:store-provisioner`
+4. Verify: `kubectl auth can-i get secrets -n platform --as=system:serviceaccount:platform:store-provisioner`
+   must answer `no`, and the same check in a `store-<slug>` namespace `yes`.
+5. Roll back with `helm rollback platform <previous revision>` together with the previous provisioner image.
+   With immutable version tags the rollback restores it; with a reused tag such as `:dev`, rebuild the old
+   image first. The extra RoleBindings are harmless.
 
 Limits: one provisioner replica is enough (leases make more safe, not faster); store owners do not get the
 WordPress admin password in the dashboard (it is in the store's `store-wp-admin` Secret).
@@ -174,7 +203,8 @@ WordPress admin password in the dashboard (it is in the store's `store-wp-admin`
 | Concern | Local (`values-local.yaml`) | VPS (`values-prod.yaml`) |
 |---|---|---|
 | DNS | `*.localtest.me` → 127.0.0.1 (public DNS) | Real A records for `store.<domain>`, `app.<domain>` |
-| Ingress | Traefik (k3d), HTTP, ports mapped by k3d | Traefik (k3s), TLS via cert-manager (`tlsSecret`, issuer annotation) |
+| Ingress | Traefik (k3d), HTTP, ports mapped by k3d | Traefik (k3s), TLS via cert-manager (`tlsSecret`, issuer annotation); a NetworkPolicy admits cert-manager's HTTP-01 solver pods from the ingress controller (rendered only with TLS); store URLs `stores.urlScheme: https` |
+| Provisioner egress | API server endpoint only (`provisioner.apiServerCidr`, required; `make deploy-local` reads it from the EndpointSlice) | Same (`make deploy-prod`) |
 | Cookies | `COOKIE_SECURE=false` | `cookieSecure: true` |
 | Storage | `local-path` (k3d default) | `local-path` on the VPS disk, or a cloud block-storage class; larger sizes |
 | Images | Built locally, `k3d image import`, `pullPolicy: Never` | Pushed to a registry with version tags |

@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { test } from 'node:test';
 import { decrypt, encrypt, hashPassword, newApiKey, parseApiKey, verifyPassword } from '../src/crypto.ts';
+import { helmUpgradeArgs, nestValues } from '../src/kube.ts';
+import { storeInput } from '../src/stores.ts';
 import { exposedToolName, slugOf } from '../src/upstreams.ts';
 import { checkAddress, createGuardedFetch, hostAllowed, validateUpstreamUrl } from '../src/url-guard.ts';
 
@@ -136,4 +138,41 @@ test('Azure OpenAI adapter: deployment URL, api-key header, tool-call parsing', 
   assert.equal(seen?.headers['api-key'], 'k-123');
   assert.equal(seen?.body.model, undefined);
   assert.equal(reply.toolCalls[0]?.function.name, 'a__b');
+});
+
+test('store values reach Helm as a file: a store name cannot set other chart values', () => {
+  const name = 'Shop,host=app.localtest.me,woocommerceMcp.image=attacker/evil:1';
+  const values = nestValues({
+    host: 'shop.store.test',
+    'store.title': name,
+    'gateway.namespace': 'platform',
+  });
+  assert.deepEqual(values, {
+    host: 'shop.store.test',
+    store: { title: name }, // the whole name, literally, as the title
+    gateway: { namespace: 'platform' },
+  });
+  const args = helmUpgradeArgs(
+    { chartDir: '/c', valuesFile: '/c/values-local.yaml' },
+    'store-shop',
+    '/t/v.json',
+    90,
+  );
+  assert.ok(!args.some((a) => a.startsWith('--set')), 'no --set/--set-string: they split on "," and "="');
+  assert.deepEqual(args.slice(args.indexOf('-f')), [
+    '-f',
+    '/c/values-local.yaml',
+    '-f',
+    '/t/v.json',
+    '--wait',
+    '--timeout',
+    '90s',
+  ]);
+});
+
+test('store names: separators that mean something to Helm are rejected', () => {
+  for (const name of ['Shop,host=x', 'a=b', 'x{y}', 'back\\slash', 'q"uote', 'semi;colon'])
+    assert.equal(storeInput.safeParse({ name, slug: 'shop' }).success, false, name);
+  for (const name of ['North Shop', "Bob's Café & Co (2)", 'Store 12 - South', 'Ünïcödé Märkt'])
+    assert.equal(storeInput.safeParse({ name, slug: 'shop' }).success, true, name);
 });

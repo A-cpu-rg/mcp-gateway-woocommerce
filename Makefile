@@ -7,6 +7,9 @@ TAG         ?= dev
 ADMIN_EMAIL ?= admin@example.com
 IMAGES      := gateway woocommerce-mcp toolbox-mcp everything-mcp store-provisioner
 HELM_WAIT   := --wait --timeout 10m
+# The provisioner's only egress besides Postgres: the API server endpoint of the cluster kubectl points at.
+API_SERVER_IP ?= $(shell kubectl get endpointslice -l kubernetes.io/service-name=kubernetes -o jsonpath='{.items[0].endpoints[0].addresses[0]}' 2>/dev/null)
+API_SERVER_SET = --set provisioner.apiServerCidr=$(API_SERVER_IP)/32
 
 .PHONY: up cluster images import secrets deploy-local deploy-prod e2e status down charts-check
 
@@ -29,17 +32,19 @@ secrets:
 	STORE_NS=$(STORE_NS) PLATFORM_NS=$(PLATFORM_NS) ADMIN_EMAIL=$(ADMIN_EMAIL) scripts/create-secrets.sh
 
 deploy-local:
+	@test -n "$(API_SERVER_IP)" || { echo 'cannot read the API server endpoint; pass API_SERVER_IP=<ip>'; exit 1; }
 	helm upgrade --install store deploy/charts/store -n $(STORE_NS) \
 	  -f deploy/charts/store/values-local.yaml --set gateway.namespace=$(PLATFORM_NS) $(HELM_WAIT)
 	helm upgrade --install platform deploy/charts/platform -n $(PLATFORM_NS) \
-	  -f deploy/charts/platform/values-local.yaml --set "upstreamNamespaces={$(STORE_NS)}" $(HELM_WAIT)
+	  -f deploy/charts/platform/values-local.yaml --set "upstreamNamespaces={$(STORE_NS)}" $(API_SERVER_SET) $(HELM_WAIT)
 	kubectl -n $(PLATFORM_NS) rollout restart deploy/gateway   # pick up a refreshed gateway-llm Secret
 
 deploy-prod:
+	@test -n "$(API_SERVER_IP)" || { echo 'cannot read the API server endpoint; pass API_SERVER_IP=<ip>'; exit 1; }
 	helm upgrade --install store deploy/charts/store -n $(STORE_NS) \
 	  -f deploy/charts/store/values-prod.yaml --set gateway.namespace=$(PLATFORM_NS) $(HELM_WAIT)
 	helm upgrade --install platform deploy/charts/platform -n $(PLATFORM_NS) \
-	  -f deploy/charts/platform/values-prod.yaml --set "upstreamNamespaces={$(STORE_NS)}" $(HELM_WAIT)
+	  -f deploy/charts/platform/values-prod.yaml --set "upstreamNamespaces={$(STORE_NS)}" $(API_SERVER_SET) $(HELM_WAIT)
 
 # Definition-of-done checks. The dead-upstream check scales everything-mcp to 0 and restores it afterwards.
 e2e:
@@ -59,10 +64,13 @@ status:
 down:
 	k3d cluster delete $(CLUSTER)
 
-# Static checks used by CI: lint and render both charts for both environments, validate the manifests.
+# Static checks used by CI: lint and render both charts for both environments, validate the manifests, then
+# assert the security invariants of the rendered output (scripts/chart-checks.sh).
+CHECK_SET := --set provisioner.apiServerCidr=10.0.0.1/32
 charts-check:
 	@for c in store platform; do for env in local prod; do \
-	  helm lint deploy/charts/$$c -f deploy/charts/$$c/values-$$env.yaml >/dev/null || exit 1; \
-	  helm template $$c deploy/charts/$$c -n $$c -f deploy/charts/$$c/values-$$env.yaml \
+	  helm lint deploy/charts/$$c -f deploy/charts/$$c/values-$$env.yaml $(CHECK_SET) >/dev/null || exit 1; \
+	  helm template $$c deploy/charts/$$c -n $$c -f deploy/charts/$$c/values-$$env.yaml $(CHECK_SET) \
 	    | kubeconform -strict -summary -kubernetes-version 1.33.0 || exit 1; \
 	done; done
+	scripts/chart-checks.sh

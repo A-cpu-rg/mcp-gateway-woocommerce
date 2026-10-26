@@ -26,6 +26,9 @@ can do. That is why:
   (`upstream_servers.store_id` → `stores.owner_id`, read from Postgres on every list and call). A server
   that is not linked to a store, such as the first store's, grants members nothing beyond ordinary tools.
 - Every call is audited with the real user, so actions done with a shared credential remain attributable.
+  The audit row is written before the call reaches the upstream, and a call that cannot be recorded is not
+  made, so a database problem cannot produce an unaudited write. Failed calls keep the tool's error text
+  (truncated, bearer tokens redacted); arguments and results are never stored.
 - The upstream sees only "the gateway". It cannot tell members apart, so per-user limits must live in the gateway.
 - Residual risk: whatever a read tool exposes (e.g. customer names and emails in orders) is visible to every
   member who may call it. Least privilege on the upstream key (a read-only WooCommerce key for a read-only
@@ -77,22 +80,20 @@ and results reach the model and the team's MCP clients. What it can try, and wha
 - The gateway, which faces the internet and runs the chat agent, holds no Kubernetes credentials. A
   compromised gateway can request stores (bounded by the per-user limit) but cannot create or delete
   arbitrary cluster objects.
-- The store-provisioner's ClusterRole is cluster-wide because namespaces are created at runtime. Its real
-  reach, checked with `kubectl auth can-i --as=system:serviceaccount:platform:store-provisioner`: read and
-  update Secrets in **every** namespace (including `platform/gateway-secrets`, which holds `ENCRYPTION_KEY`
-  and the admin password), delete any namespace, and create Deployments and Jobs in any namespace. A
-  Deployment in `kube-system` may run as `helm-traefik`, which k3s binds to `cluster-admin` (confirmed with a
-  server-side dry run), so **a compromised provisioner pod is a cluster admin.** The namespace allow-pattern
-  in code (`assertStoreNamespace`) only stops the provisioner's own bugs, not an attacker holding its token.
-  Mitigations today: no inbound network access at all, ownership labels checked before any delete, quotas
-  on store namespaces. Fix (not yet applied): keep only `create namespaces` cluster-wide and grant everything
-  else through a RoleBinding the provisioner creates inside each `store-*` namespace it makes (bound to a
-  ClusterRole it is allowed to `bind`), so it holds no rights in `platform` or `kube-system`.
-- Known gap: the store name is passed to Helm as `--set-string store.title=<name>`, and Helm splits that on
-  commas, so a name such as `Shop,host=app.localtest.me,woocommerceMcp.image=x/y:1` (it passes the 80-char
-  name validation) sets other chart values: the storefront Ingress host and the container images of that
-  store. Fix: pass user-supplied values through a values file or `--set-json`, and restrict the name's
-  character set.
+- Store-provisioner RBAC is least privilege. Cluster-wide it may only manage namespaces and create
+  RoleBindings that grant one role, `<release ns>-store-tenant`; it binds that role to itself in each
+  `store-<slug>` namespace it creates (and, for older stores, before teardown). It holds no rights in
+  `platform`, `kube-system` or any other namespace: no Secrets, no workloads. RBAC cannot restrict names by
+  prefix, so a ValidatingAdmissionPolicy (`provisioner.admissionPolicy`, Kubernetes >= 1.30) limits its
+  namespace and RoleBinding writes to `store-*`, to the tenant role, and to itself as the subject. The
+  remaining cluster-wide power is deleting `store-*` namespaces; the code additionally checks the store-id
+  label before deleting one. The previous chart version gave it a cluster-wide role over Secrets and
+  workloads, which on k3s amounted to cluster-admin (a Deployment in `kube-system` can run as
+  `helm-traefik`); a cluster installed from that version keeps those rights until the chart is upgraded
+  (see the migration in [design.md](design.md#provisioner-rbac-migration)).
+- Store names cannot set chart values. Per-store values reach Helm only through a values file, never
+  `--set`/`--set-string` (which split on `,` and `=`, so a name like `Shop,host=app.example.com` would have
+  set the Ingress host or images), and names are limited to letters, digits, spaces and `. ' & ( ) -`.
 - A member can create stores and delete only their own; their stores' tools become available to the team
   through the gateway. The store's write tools stay admin-only for everyone except its owner. Ownership
   comes only from the link the provisioner records when it registers the server, never from a server or

@@ -82,3 +82,21 @@ spec:
     - from: [{ podSelector: { matchLabels: { app.kubernetes.io/name: gateway } } }]
       ports: [{ port: 8080 }]
   egress: []
+{{- if .Values.ingress.tlsSecret }}
+---
+# cert-manager HTTP-01: for each certificate it starts a solver pod in this namespace and routes
+# /.well-known/acme-challenge/ to it through the ingress controller. Default-deny would block that request,
+# so issuance (and renewal) would fail. Only the ingress controller, only the solver port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: acme-http01-solver
+  labels: {{- include "platform.labels" . | nindent 4 }}
+spec:
+  podSelector: { matchLabels: { acme.cert-manager.io/http01-solver: "true" } }
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: {{ .Values.ingress.controllerNamespace }} } }
+      ports: [{ port: 8089 }]
+{{- end }}

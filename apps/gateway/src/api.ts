@@ -13,7 +13,14 @@ import {
   sessionPrincipal,
 } from './auth.ts';
 import { type Broker, mayUseTool } from './broker.ts';
-import { createServer, publicServer, type ServerDeps, serverInput, updateServer } from './servers.ts';
+import {
+  assertNotStoreServer,
+  createServer,
+  publicServer,
+  type ServerDeps,
+  serverInput,
+  updateServer,
+} from './servers.ts';
 import {
   deleteStore,
   listStores,
@@ -167,8 +174,13 @@ export function createApi(d: ApiDeps): Hono<Env> {
   });
   api.delete('/servers/:id', async (c) => {
     requireAdmin(c);
-    const { rowCount } = await d.db.query('DELETE FROM upstream_servers WHERE id = $1', [c.req.param('id')]);
-    if (!rowCount) throw new HttpError(404, 'not_found', 'server not found');
+    const { rowCount } = await d.db.query('DELETE FROM upstream_servers WHERE id = $1 AND store_id IS NULL', [
+      c.req.param('id'),
+    ]);
+    if (!rowCount) {
+      await assertNotStoreServer(d.db, c.req.param('id'), 'removed');
+      throw new HttpError(404, 'not_found', 'server not found');
+    }
     await d.pool.refreshAll();
     return c.json({ ok: true });
   });
@@ -299,7 +311,7 @@ export function createApi(d: ApiDeps): Hono<Env> {
   };
   api.get('/stores', async (c) => {
     storeSettings();
-    return c.json(await listStores(d.db, c.get('principal')));
+    return c.json(await listStores(d.db, storeSettings(), c.get('principal')));
   });
   api.post('/stores', async (c) => {
     const { store, created } = await requestStore(

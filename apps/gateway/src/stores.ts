@@ -26,6 +26,8 @@ export interface StoreRow {
 export interface StoreSettings {
   /** Host for a store's storefront, e.g. "{slug}.store.localtest.me". */
   hostTemplate: string;
+  /** How storefronts are served: "https" when the store chart terminates TLS (values-prod), else "http". */
+  urlScheme: 'http' | 'https';
   maxPerUser: number;
   timeoutMs: number;
 }
@@ -42,7 +44,14 @@ export class StoreError extends Error {
 const RESERVED = new Set(['www', 'app', 'api', 'admin', 'store', 'platform', 'default', 'kube', 'system']);
 
 export const storeInput = z.object({
-  name: z.string().trim().min(1).max(80),
+  // The name becomes the store title (a Helm value). Values are passed as a file, never --set; this
+  // character set is defence in depth and keeps "," "=" "{" "\" out of anything chart-bound.
+  name: z
+    .string()
+    .trim()
+    .min(1)
+    .max(80)
+    .regex(/^[\p{L}\p{N} .'&()-]+$/u, "letters, digits, spaces and . ' & ( ) -"),
   slug: z
     .string()
     .regex(
@@ -58,7 +67,7 @@ export const storeNamespace = (slug: string) => `store-${slug}`;
 export const storeServerSlug = (slug: string) => `store-${slug}`;
 export const storeHost = (template: string, slug: string) => template.replaceAll('{slug}', slug);
 
-export function publicStore(row: StoreRow & { owner_email?: string }) {
+export function publicStore(row: StoreRow & { owner_email?: string }, scheme: StoreSettings['urlScheme']) {
   return {
     id: row.id,
     slug: row.slug,
@@ -66,7 +75,7 @@ export function publicStore(row: StoreRow & { owner_email?: string }) {
     owner: row.owner_email,
     status: row.status,
     reason: row.status_reason,
-    url: `http://${row.host}`,
+    url: `${scheme}://${row.host}`,
     tools: `${storeServerSlug(row.slug)}__*`,
     createdAt: row.created_at,
     readyAt: row.ready_at,
@@ -74,13 +83,13 @@ export function publicStore(row: StoreRow & { owner_email?: string }) {
   };
 }
 
-export async function listStores(db: Db, p: Principal) {
+export async function listStores(db: Db, settings: StoreSettings, p: Principal) {
   const { rows } = await db.query<StoreRow & { owner_email: string }>(
     `SELECT s.*, u.email AS owner_email FROM stores s JOIN users u ON u.id = s.owner_id
      WHERE $1 OR s.owner_id = $2 ORDER BY s.created_at`,
     [p.role === 'admin', p.userId],
   );
-  return rows.map(publicStore);
+  return rows.map((r) => publicStore(r, settings.urlScheme));
 }
 
 /**
@@ -104,7 +113,7 @@ export async function requestStore(
       await client.query('ROLLBACK');
       if (found.owner_id !== p.userId) throw new StoreError(409, `store "${input.slug}" already exists`);
       if (found.status === 'deleting') throw new StoreError(409, `store "${input.slug}" is being deleted`);
-      return { store: publicStore(found), created: false };
+      return { store: publicStore(found, settings.urlScheme), created: false };
     }
     const taken = await client.query('SELECT 1 FROM upstream_servers WHERE slug = $1', [
       storeServerSlug(input.slug),
@@ -131,7 +140,7 @@ export async function requestStore(
       ],
     );
     await client.query('COMMIT');
-    return { store: publicStore(rows[0] as StoreRow), created: true };
+    return { store: publicStore(rows[0] as StoreRow, settings.urlScheme), created: true };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     throw err;
@@ -161,7 +170,7 @@ export async function retryStore(db: Db, settings: StoreSettings, p: Principal, 
      WHERE id = $1 AND status = 'failed' RETURNING *`,
     [id, settings.timeoutMs / 1000],
   );
-  return publicStore((rows[0] ?? row) as StoreRow);
+  return publicStore((rows[0] ?? row) as StoreRow, settings.urlScheme);
 }
 
 /** Marks a store for teardown. Idempotent; the provisioner removes registration, release and namespace. */
@@ -173,8 +182,9 @@ export async function deleteStore(db: Db, p: Principal, id: string) {
      WHERE id = $1 AND status <> 'deleting'`,
     [id],
   );
-  // Tools disappear immediately for everyone, before the namespace is gone.
-  await db.query('UPDATE upstream_servers SET enabled = false, updated_at = now() WHERE slug = $1', [
-    storeServerSlug(row.slug),
+  // Tools disappear immediately for everyone, before the namespace is gone. Matched by the store link, not
+  // the slug: the link is what grants the owner its tools, and it survives any edit of the registration.
+  await db.query('UPDATE upstream_servers SET enabled = false, updated_at = now() WHERE store_id = $1', [
+    row.id,
   ]);
 }

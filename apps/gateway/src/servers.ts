@@ -1,6 +1,7 @@
 import * as z from 'zod/v4';
 import { encrypt } from './crypto.ts';
 import type { Db } from './db.ts';
+import { StoreError } from './stores.ts';
 import type { ServerRow, UpstreamPool } from './upstreams.ts';
 import { validateUpstreamUrl } from './url-guard.ts';
 
@@ -84,7 +85,7 @@ export async function updateServer(d: ServerDeps, id: string, input: ServerInput
   const { rows } = await d.db.query<ServerRow>(
     `UPDATE upstream_servers SET slug = $2, name = $3, url = $4, enabled = $5, auth_type = $6, auth_header = $7,
        credential_enc = CASE WHEN $11 THEN $8::bytea ELSE credential_enc END, timeout_ms = $9, admin_only_tools = $10, updated_at = now()
-     WHERE id = $1 RETURNING *`,
+     WHERE id = $1 AND (store_id IS NULL OR slug = $2) RETURNING *`,
     [
       id,
       input.slug,
@@ -100,8 +101,27 @@ export async function updateServer(d: ServerDeps, id: string, input: ServerInput
     ],
   );
   const row = rows[0];
-  if (row) await d.pool.check(row);
-  return row ?? null;
+  if (!row) {
+    await assertNotStoreServer(d.db, id, 'renamed');
+    return null;
+  }
+  await d.pool.check(row);
+  return row;
+}
+
+/**
+ * A provisioned store's registration follows the store: its name is how tools say which store they act on, and
+ * teardown removes it with the store. Admins can still edit everything else (URL, timeout, admin-only tools).
+ */
+export async function assertNotStoreServer(db: Db, id: string, action: 'renamed' | 'removed'): Promise<void> {
+  const { rows } = await db.query<{ slug: string }>(
+    'SELECT s.slug FROM upstream_servers us JOIN stores s ON s.id = us.store_id WHERE us.id = $1',
+    [id],
+  );
+  if (rows[0]) {
+    const why = action === 'renamed' ? 'its name follows the store' : 'delete the store to remove it';
+    throw new StoreError(409, `this server belongs to store "${rows[0].slug}": ${why}`);
+  }
 }
 
 /** What the dashboard sees. No credential, only whether one is set. */

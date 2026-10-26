@@ -88,7 +88,12 @@ describe('store owner permissions', { skip }, () => {
     await addUser('bob@example.com', 'member'); // owns store "bob-shop"
     await addUser('carol@example.com', 'member'); // owns no store
 
-    const settings = { hostTemplate: '{slug}.store.test', maxPerUser: 2, timeoutMs: 60_000 };
+    const settings = {
+      hostTemplate: '{slug}.store.test',
+      urlScheme: 'http' as const,
+      maxPerUser: 2,
+      timeoutMs: 60_000,
+    };
     for (const [owner, slug] of [
       ['alice@example.com', 'alice-shop'],
       ['bob@example.com', 'bob-shop'],
@@ -246,6 +251,45 @@ describe('store owner permissions', { skip }, () => {
     assert.deepEqual(writes.ghost, []);
     await gw.db.query("DELETE FROM upstream_servers WHERE slug = 'store-ghost'");
     await gw.db.query("DELETE FROM stores WHERE slug = 'ghost'");
+  });
+
+  test('admins cannot rename or remove a store-linked server through the API (409); other edits work', async () => {
+    const cookie = await gw.loginAs(ADMIN.email, ADMIN.password);
+    const list = (await gw.request('/api/servers', { cookie })).json as Record<string, unknown>[];
+    const s = list.find((x) => x.slug === 'store-alice-shop') as Record<string, unknown>;
+    const body = (slug: string, timeoutMs = 10_000) =>
+      JSON.stringify({
+        slug,
+        name: s.name,
+        url: s.url,
+        authType: s.authType,
+        timeoutMs,
+        adminOnlyTools: s.adminOnlyTools,
+      });
+    const del = await gw.request(`/api/servers/${s.id}`, { method: 'DELETE', cookie, body: '{}' });
+    assert.equal(del.status, 409, del.text);
+    assert.match(del.json.error.message, /belongs to store "alice-shop": delete the store to remove it/);
+    const rename = await gw.request(`/api/servers/${s.id}`, {
+      method: 'PUT',
+      cookie,
+      body: body('stolen-name'),
+    });
+    assert.equal(rename.status, 409, rename.text);
+    const edit = await gw.request(`/api/servers/${s.id}`, {
+      method: 'PUT',
+      cookie,
+      body: body('store-alice-shop', 7000),
+    });
+    assert.equal(edit.status, 200, edit.text);
+    assert.equal(edit.json.timeoutMs, 7000);
+    assert.ok((await gw.pool.serverBySlug('store-alice-shop'))?.store_id, 'still registered and linked');
+    // An unlinked server is still removable.
+    await register('fde-temp', ups[0]?.url as string);
+    const temp = (await gw.pool.serverBySlug('fde-temp'))?.id;
+    assert.equal(
+      (await gw.request(`/api/servers/${temp}`, { method: 'DELETE', cookie, body: '{}' })).status,
+      200,
+    );
   });
 
   test('ownership that cannot be resolved denies: store record gone, or the lookup fails', async () => {
