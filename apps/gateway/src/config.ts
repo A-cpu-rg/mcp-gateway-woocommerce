@@ -1,3 +1,5 @@
+import type { StoreSettings } from './stores.ts';
+
 function env(name: string, fallback?: string): string {
   const v = process.env[name] ?? fallback;
   if (v === undefined || v === '') throw new Error(`missing env ${name}`);
@@ -29,6 +31,8 @@ export interface Config {
   seedServers?: string;
   llm?: LlmConfig;
   dashboardDir?: string;
+  /** Multi-store provisioning (set when the store-provisioner is deployed). */
+  stores?: StoreSettings;
 }
 
 export function loadConfig(): Config {
@@ -61,5 +65,13 @@ export function loadConfig(): Config {
         }
       : undefined,
     dashboardDir: process.env.DASHBOARD_DIR,
+    stores:
+      process.env.STORES_ENABLED === 'true'
+        ? {
+            hostTemplate: env('STORE_HOST_TEMPLATE', '{slug}.store.localtest.me'),
+            maxPerUser: Number(env('MAX_STORES_PER_USER', '2')),
+            timeoutMs: Number(env('STORE_PROVISION_TIMEOUT_MS', String(15 * 60_000))),
+          }
+        : undefined,
   };
 }

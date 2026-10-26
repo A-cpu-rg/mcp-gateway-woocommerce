@@ -6,10 +6,11 @@ import { Chat } from './pages/Chat.tsx';
 import { Keys } from './pages/Keys.tsx';
 import { Invite, Login } from './pages/Login.tsx';
 import { Servers } from './pages/Servers.tsx';
+import { Stores } from './pages/Stores.tsx';
 import { Team } from './pages/Team.tsx';
 import './styles.css';
 
-const TABS = ['servers', 'chat', 'keys', 'audit', 'team'] as const;
+const TABS = ['servers', 'stores', 'chat', 'keys', 'audit', 'team'] as const;
 type Tab = (typeof TABS)[number];
 
 function useHash(): string {
@@ -38,7 +39,9 @@ function App() {
   if (me === null) return <Login onLogin={load} />;
 
   const tab = (TABS.find((t) => hash === `#/${t}`) ?? 'servers') as Tab;
-  const visible = TABS.filter((t) => t !== 'team' || me.role === 'admin');
+  const visible = TABS.filter(
+    (t) => (t !== 'team' || me.role === 'admin') && (t !== 'stores' || me.storesEnabled),
+  );
   return (
     <div className="layout">
       <header>
@@ -63,6 +66,7 @@ function App() {
       </header>
       <main>
         {tab === 'servers' && <Servers me={me} />}
+        {tab === 'stores' && me.storesEnabled && <Stores me={me} />}
         {tab === 'chat' && <Chat me={me} />}
         {tab === 'keys' && <Keys me={me} />}
         {tab === 'audit' && <Audit me={me} />}

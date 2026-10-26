@@ -16,3 +16,8 @@ toolbox:
   image: ghcr.io/your-org/toolbox-mcp:1.0.0
 everything:
   image: ghcr.io/your-org/everything-mcp:1.0.0
+stores:
+  hostTemplate: "{slug}.store.example.com"   # wildcard DNS: *.store.example.com -> VPS
+provisioner:
+  image: ghcr.io/your-org/store-provisioner:1.0.0
+  storeValuesFile: values-prod.yaml

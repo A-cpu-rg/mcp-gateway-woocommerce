@@ -53,7 +53,14 @@ export async function createGateway(
   app.all('/mcp', (c) => mcp.handle(c.req.raw));
   app.route(
     '/api',
-    createApi({ ...deps, broker, model, mcpUrl: `${cfg.publicUrl}/mcp`, cookieSecure: cfg.cookieSecure }),
+    createApi({
+      ...deps,
+      broker,
+      model,
+      mcpUrl: `${cfg.publicUrl}/mcp`,
+      cookieSecure: cfg.cookieSecure,
+      stores: cfg.stores,
+    }),
   );
 
   // Dashboard SPA (built by apps/dashboard) served from the same origin: no CORS, SameSite cookies work.

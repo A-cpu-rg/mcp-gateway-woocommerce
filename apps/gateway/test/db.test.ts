@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import { readdir } from 'node:fs/promises';
 import { createServer as createNetServer } from 'node:net';
 import { after, describe, test } from 'node:test';
 import { acceptInvite, createInvite, login } from '../src/auth.ts';
@@ -59,7 +60,14 @@ describe('database', { skip }, () => {
     const { pools } = await start(3);
     const [a, b, c] = pools as [Db, Db, Db];
     const applied = await Promise.all([migrate(a), migrate(b), migrate(c)]);
-    assert.equal(applied.flat().length, 1, 'exactly one replica applied 001_init.sql');
+    const files = (await readdir(new URL('../src/migrations/', import.meta.url))).filter((f) =>
+      f.endsWith('.sql'),
+    );
+    assert.deepEqual(
+      applied.flat().sort(),
+      files.sort(),
+      'every migration applied exactly once, by one replica',
+    );
     await a.query("INSERT INTO users (email, name, role) VALUES ('keep@example.com', 'Keep', 'member')");
     assert.deepEqual(await migrate(b), [], 'a second run is a no-op');
     const { rowCount } = await c.query("SELECT 1 FROM users WHERE email = 'keep@example.com'");

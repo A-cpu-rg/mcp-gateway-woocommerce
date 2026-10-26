@@ -26,6 +26,7 @@ export interface Me {
   role: 'admin' | 'member';
   mcpUrl: string;
   chatEnabled: boolean;
+  storesEnabled: boolean;
 }
 
 export interface Tool {

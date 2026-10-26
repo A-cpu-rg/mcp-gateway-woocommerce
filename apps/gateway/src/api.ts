@@ -12,8 +12,17 @@ import {
   revokeApiKey,
   sessionPrincipal,
 } from './auth.ts';
-import type { Broker } from './broker.ts';
+import { type Broker, mayUseTool } from './broker.ts';
 import { createServer, publicServer, type ServerDeps, serverInput, updateServer } from './servers.ts';
+import {
+  deleteStore,
+  listStores,
+  requestStore,
+  retryStore,
+  StoreError,
+  type StoreSettings,
+  storeInput,
+} from './stores.ts';
 import { UrlPolicyError } from './url-guard.ts';
 
 const COOKIE = 'mgw_session';
@@ -24,6 +33,7 @@ export interface ApiDeps extends ServerDeps {
   model?: ChatModel;
   mcpUrl: string;
   cookieSecure: boolean;
+  stores?: StoreSettings;
 }
 
 class HttpError extends Error {
@@ -52,6 +62,8 @@ export function createApi(d: ApiDeps): Hono<Env> {
   api.onError((err, c) => {
     if (err instanceof HttpError)
       return c.json({ error: { code: err.code, message: err.message } }, err.status);
+    if (err instanceof StoreError)
+      return c.json({ error: { code: 'store_error', message: err.message } }, err.status);
     if (err instanceof UrlPolicyError)
       return c.json({ error: { code: 'url_rejected', message: err.message } }, 400);
     if ((err as { code?: string }).code === '23505') {
@@ -113,20 +125,22 @@ export function createApi(d: ApiDeps): Hono<Env> {
     return c.json({ ok: true });
   });
 
-  api.get('/me', (c) => c.json({ ...c.get('principal'), mcpUrl: d.mcpUrl, chatEnabled: !!d.model }));
+  api.get('/me', (c) =>
+    c.json({ ...c.get('principal'), mcpUrl: d.mcpUrl, chatEnabled: !!d.model, storesEnabled: !!d.stores }),
+  );
 
   // ---- servers ----
   api.get('/servers', async (c) => {
     const p = c.get('principal');
     const rows = await d.pool.servers();
     const list = rows.map((r) => publicServer(r, d.pool));
-    // Members see status and the tools they can use, not URLs or credential settings.
+    // Members see status and the tools they can use (same policy as the broker), not URLs or credentials.
     if (p.role === 'admin') return c.json(list);
     return c.json(
       list.map(
-        ({ url: _u, authType: _a, authHeader: _h, hasCredential: _c, adminOnlyTools: _t, ...rest }) => ({
+        ({ url: _u, authType: _a, authHeader: _h, hasCredential: _c, adminOnlyTools: _t, ...rest }, i) => ({
           ...rest,
-          tools: rest.tools.filter((t) => !t.adminOnly),
+          tools: rest.tools.filter((t) => mayUseTool(p, rows[i] as (typeof rows)[number], t.name)),
         }),
       ),
     );
@@ -276,6 +290,33 @@ export function createApi(d: ApiDeps): Hono<Env> {
       ],
     );
     return c.json(rows);
+  });
+
+  // ---- stores (multi-store provisioning; the store-provisioner does the Kubernetes work) ----
+  const storeSettings = (): StoreSettings => {
+    if (!d.stores) throw new HttpError(400, 'stores_disabled', 'store provisioning is not enabled');
+    return d.stores;
+  };
+  api.get('/stores', async (c) => {
+    storeSettings();
+    return c.json(await listStores(d.db, c.get('principal')));
+  });
+  api.post('/stores', async (c) => {
+    const { store, created } = await requestStore(
+      d.db,
+      storeSettings(),
+      c.get('principal'),
+      await body(c, storeInput),
+    );
+    return c.json(store, created ? 201 : 200);
+  });
+  api.post('/stores/:id/retry', async (c) =>
+    c.json(await retryStore(d.db, storeSettings(), c.get('principal'), c.req.param('id'))),
+  );
+  api.delete('/stores/:id', async (c) => {
+    storeSettings();
+    await deleteStore(d.db, c.get('principal'), c.req.param('id'));
+    return c.json({ ok: true });
   });
 
   // ---- chat agent: streams NDJSON events (tool calls, results, final message) ----

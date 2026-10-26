@@ -10,6 +10,8 @@ mariadb:
   storage: 10Gi
 wordpress:
   storage: 10Gi
+quota:
+  storage: 25Gi                   # mariadb 10Gi + wordpress 10Gi + headroom
 woocommerceMcp:
   image: ghcr.io/your-org/woocommerce-mcp:1.0.0
   pullPolicy: IfNotPresent

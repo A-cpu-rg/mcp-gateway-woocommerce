@@ -5,7 +5,7 @@ STORE_NS    ?= store
 PLATFORM_NS ?= platform
 TAG         ?= dev
 ADMIN_EMAIL ?= admin@example.com
-IMAGES      := gateway woocommerce-mcp toolbox-mcp everything-mcp
+IMAGES      := gateway woocommerce-mcp toolbox-mcp everything-mcp store-provisioner
 HELM_WAIT   := --wait --timeout 10m
 
 .PHONY: up cluster images import secrets deploy-local deploy-prod e2e status down charts-check
@@ -20,6 +20,7 @@ images:
 	docker build --target app            --build-arg APP=woocommerce-mcp -t urumi/woocommerce-mcp:$(TAG) .
 	docker build --target app            --build-arg APP=toolbox-mcp     -t urumi/toolbox-mcp:$(TAG) .
 	docker build --target everything-mcp                                  -t urumi/everything-mcp:$(TAG) .
+	docker build --target store-provisioner --build-arg APP=gateway     -t urumi/store-provisioner:$(TAG) .
 
 import:
 	k3d image import -c $(CLUSTER) $(foreach i,$(IMAGES),urumi/$(i):$(TAG))

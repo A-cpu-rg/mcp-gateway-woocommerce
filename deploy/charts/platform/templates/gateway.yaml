@@ -42,6 +42,10 @@ spec:
             - { name: COOKIE_SECURE, value: {{ .Values.gateway.cookieSecure | quote }} }
             - { name: UPSTREAM_ALLOWED_HOSTS, value: {{ .Values.gateway.upstreamAllowedHosts | quote }} }
             - { name: HEALTH_INTERVAL_MS, value: {{ .Values.gateway.healthIntervalMs | quote }} }
+            - { name: STORES_ENABLED, value: {{ .Values.stores.enabled | quote }} }
+            - { name: STORE_HOST_TEMPLATE, value: {{ .Values.stores.hostTemplate | quote }} }
+            - { name: MAX_STORES_PER_USER, value: {{ .Values.stores.maxPerUser | quote }} }
+            - { name: STORE_PROVISION_TIMEOUT_MS, value: {{ mul .Values.stores.timeoutMinutes 60000 | quote }} }
           envFrom:
             - secretRef: { name: {{ .Values.secrets.gateway }} }
             - secretRef: { name: {{ .Values.secrets.upstreams }}, optional: true }

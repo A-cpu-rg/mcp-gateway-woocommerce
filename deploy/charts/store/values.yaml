@@ -46,6 +46,15 @@ wordpress:
     requests: { cpu: 100m, memory: 256Mi }
     limits: { cpu: "1", memory: 512Mi }
 
+# Namespace guardrails (templates/guardrails.yaml). Sized for MariaDB + WordPress + MCP server + the setup Job,
+# with room for a rolling update. The sum of the workloads' requests/limits must stay below these.
+quota:
+  requests: { cpu: "1", memory: 1536Mi }
+  limits: { cpu: "6", memory: 3Gi }
+  pods: 10
+  pvcs: 4
+  storage: 10Gi
+
 woocommerceMcp:
   image: urumi/woocommerce-mcp:dev
   pullPolicy: IfNotPresent

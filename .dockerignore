@@ -3,4 +3,6 @@
 .git
 .env
 deploy
+# The store-provisioner image bundles the store chart.
+!deploy/charts/store
 docs

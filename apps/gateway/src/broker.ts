@@ -1,6 +1,12 @@
 import type { Principal } from './auth.ts';
 import type { Db } from './db.ts';
-import { type CallOutcome, slugOf, type UpstreamPool, type UpstreamTool } from './upstreams.ts';
+import {
+  type CallOutcome,
+  type ServerRow,
+  slugOf,
+  type UpstreamPool,
+  type UpstreamTool,
+} from './upstreams.ts';
 
 export type Channel = 'mcp' | 'chat';
 
@@ -44,6 +50,17 @@ export async function writeAudit(db: Db, a: AuditEntry): Promise<void> {
   }
 }
 
+/**
+ * The tool policy, shared by listing and calling so a tool is visible exactly when it may be called.
+ * Admin-only tools: platform admins, and the owner of the store this server was provisioned for
+ * (upstream_servers.store_id -> stores.owner_id, read from the database with the server). A server that
+ * belongs to no store, or whose owner cannot be resolved, grants members nothing beyond ordinary tools.
+ */
+export function mayUseTool(p: Principal, row: ServerRow, tool: string): boolean {
+  if (!row.admin_only_tools.includes(tool) || p.role === 'admin') return true;
+  return !!row.store_id && !!row.store_owner_id && row.store_owner_id === p.userId;
+}
+
 const denied = (text: string): CallOutcome['result'] => ({
   isError: true,
   content: [{ type: 'text', text }],
@@ -64,7 +81,7 @@ export class Broker {
     this.#pool = pool;
   }
 
-  /** Tools this principal may call: enabled, connected servers only; admin-only tools hidden from members. */
+  /** Tools this principal may call: enabled, connected servers only; admin-only tools per mayUseTool. */
   async listTools(p: Principal): Promise<(UpstreamTool & { server: string })[]> {
     const rows = await this.#pool.servers();
     // A server added or edited through another replica is not in this replica's cache yet. Fetch it now,
@@ -85,7 +102,7 @@ export class Broker {
       .flatMap((r) =>
         this.#pool
           .tools(r)
-          .filter((t) => p.role === 'admin' || !r.admin_only_tools.includes(t.name))
+          .filter((t) => mayUseTool(p, r, t.name))
           .map((t) => ({
             ...t,
             server: r.slug,
@@ -132,8 +149,10 @@ export class Broker {
       return denied(msg);
     }
     // Enforced on call, not only on list: a member calling a hidden tool directly is rejected.
-    if (p.role !== 'admin' && row.admin_only_tools.includes(tool.name)) {
-      const msg = `Tool '${exposedName}' requires the admin role.`;
+    if (!mayUseTool(p, row, tool.name)) {
+      const msg = row.store_id
+        ? `Tool '${exposedName}' requires the admin role or ownership of this store.`
+        : `Tool '${exposedName}' requires the admin role.`;
       await audit(row.slug, tool.name, 'denied', msg);
       return denied(msg);
     }

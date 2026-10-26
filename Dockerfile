@@ -4,6 +4,7 @@
 #   docker build --target app             --build-arg APP=woocommerce-mcp -t urumi/woocommerce-mcp:dev .
 #   docker build --target app             --build-arg APP=toolbox-mcp     -t urumi/toolbox-mcp:dev .
 #   docker build --target everything-mcp                                  -t urumi/everything-mcp:dev .
+#   docker build --target store-provisioner --build-arg APP=gateway     -t urumi/store-provisioner:dev .
 # Services run TypeScript directly with Node's built-in type stripping, so there is no compile step.
 
 FROM node:24.22.0-alpine AS base
@@ -37,6 +38,21 @@ CMD ["node", "src/main.ts"]
 FROM app AS gateway
 COPY --from=dashboard /repo/apps/dashboard/dist ./dashboard
 ENV DASHBOARD_DIR=/app/dashboard
+
+# Helm CLI for the store-provisioner, pinned and checksum-verified.
+FROM alpine:3.22 AS helm
+ARG TARGETARCH
+ARG HELM_VERSION=3.17.3
+RUN wget -q https://get.helm.sh/helm-v${HELM_VERSION}-linux-${TARGETARCH}.tar.gz \
+      https://get.helm.sh/helm-v${HELM_VERSION}-linux-${TARGETARCH}.tar.gz.sha256sum \
+  && sha256sum -c helm-v${HELM_VERSION}-linux-${TARGETARCH}.tar.gz.sha256sum \
+  && tar -xzf helm-v${HELM_VERSION}-linux-${TARGETARCH}.tar.gz --strip-components=1 -C /usr/local/bin linux-${TARGETARCH}/helm
+
+# store-provisioner: the gateway code (build with APP=gateway), Helm, and the same store chart as `make up`.
+FROM app AS store-provisioner
+COPY --from=helm /usr/local/bin/helm /usr/local/bin/helm
+COPY deploy/charts/store /app/charts/store
+CMD ["node", "src/provisioner-main.ts"]
 
 # Third-party reference MCP server (upstream #3), pinned. Not our code: treated as untrusted by the gateway.
 FROM node:24.22.0-alpine AS everything-mcp

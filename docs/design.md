@@ -38,7 +38,8 @@ Claude Code ──POST /mcp  tools/call woocommerce__list_orders  (Authorization
              (one indexed query per request, no cache: revocation is immediate)
  broker.ts   "woocommerce__list_orders" → slug "woocommerce" (prefix before "__"; slugs cannot contain "_")
              → server row from Postgres (fresh: enabled? admin-only tools?) → cached tool "list_orders"
-             → member calling an admin-only tool? reject (also hidden from tools/list)
+             → member calling an admin-only tool, and not the owner of the server's store? reject
+               (mayUseTool: the same check hides it from tools/list and the dashboard)
  upstreams   reuse the pooled MCP client for that server (Streamable HTTP, credential decrypted in memory,
              socket address checked by the SSRF guard), AbortSignal with the server's timeout
 woocommerce-mcp  bearer check → zod validation → GET http://wordpress.store.svc/wp-json/wc/v3/orders?after=…
@@ -113,7 +114,7 @@ kubectl -n store exec mariadb-0 -- sh -c 'mariadb-dump -uroot -p"$MARIADB_ROOT_P
 kubectl -n platform exec postgres-0 -- pg_dump -U gateway gateway > gateway.sql
 ```
 
-Check persistence on a cluster (not run in this repository's environment, which has no Docker/Kubernetes):
+Check persistence on a cluster (run on k3d; see the README's verification table):
 
 ```bash
 kubectl -n store exec mariadb-0 -- sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" wordpress -e "select count(*) from wp_posts"'
@@ -121,6 +122,36 @@ kubectl -n store delete pod mariadb-0 && kubectl -n store wait --for=condition=R
 # run the same count again: it must be unchanged; also open the storefront and the orders list
 kubectl -n platform delete pod postgres-0 && kubectl -n platform rollout status deploy/gateway   # keys, servers, audit still there
 ```
+
+## Multi-store provisioning
+
+The pattern is a controller reconciling desired state, as Kubernetes operators do, but with Postgres as the
+store of desired state and the existing store chart as the unit of deployment.
+
+```
+Dashboard ─▶ gateway /api/stores ─▶ Postgres: stores (desired state, status, reason, deadline, lease)
+                                         ▲
+store-provisioner (own ServiceAccount) ──┘ claims work (FOR UPDATE SKIP LOCKED + 90 s lease, renewed)
+   ├─ namespace store-<slug>  (labels urumi.io/store=true, urumi.io/store-id=<id>)
+   ├─ Secrets (create if missing, never overwritten)
+   ├─ helm upgrade --install store deploy/charts/store -n store-<slug> --set host=<slug>.store.<domain> --wait
+   └─ registers gateway server store-<slug> (bearer token encrypted)  ─▶ gateway health check ─▶ Ready
+```
+
+| Concern | How |
+|---|---|
+| Who has cluster credentials | Only the store-provisioner (no Service, no Ingress, NetworkPolicy allows no ingress). The internet-facing gateway has none; it only writes rows. RBAC: namespaces + the kinds the store chart creates. It must be a ClusterRole because namespaces are created at runtime; the code also refuses any namespace outside `store-*` and never deletes a namespace it did not label with the store's id |
+| Several at once | Concurrency 3 per provisioner; each store is leased individually |
+| Safe to retry | Create with the same slug returns the existing store; every step is create-if-missing or `helm upgrade --install` |
+| Provisioner restarts mid-way | Its lease expires and the next provisioner re-runs the steps; a Helm release left `pending-*` is uninstalled first (volumes are kept) |
+| Fails cleanly | Transient errors are retried with backoff and shown as the reason; past the deadline (15 min) the store is **Failed** with the step and error. **Retry** gives a new deadline |
+| Not reachable except by the gateway | Unchanged store chart NetworkPolicies; the gateway's egress admits any namespace labelled `urumi.io/store=true`. The provisioner does not call store MCP servers either: it waits for the gateway's health check to report the server connected |
+| Isolation | Each store's MCP server reaches only its own WordPress; its WordPress only its own MariaDB (verified with probes across stores) |
+| Guardrails | ResourceQuota + LimitRange in every store namespace, 2 stores per user (checked under a per-user advisory lock), 15 min deadline |
+| Teardown | Server disabled immediately (tools gone for every client), then registration deleted, `helm uninstall`, namespace deleted (PVCs, Secrets, Ingress), row removed once the namespace is gone |
+
+Limits: one provisioner replica is enough (leases make more safe, not faster); store owners do not get the
+WordPress admin password in the dashboard (it is in the store's `store-wp-admin` Secret).
 
 ## Architecture decisions
 
@@ -190,6 +221,6 @@ helm rollback platform <REVISION> -n platform --wait    # previous images and ma
 | Admin and member roles; hidden + rejected tools | Tests (list and direct call); local run |
 | Own API keys, hashed, revocable | Tests (revoked → 401 on next call, audited); local run |
 | Audit log with user, server, tool, time, duration, outcome | Tests; local run (screenshot of audit page) |
-| Chat agent tool loop, acts as user, shows tool calls | Tests with a scripted model (loop, audit attribution, tool filtering); Azure adapter unit test. **Real LLM run pending an API key** |
+| Chat agent tool loop, acts as user, shows tool calls | Tests with a scripted model (loop, audit attribution, tool filtering); Azure adapter unit test; cluster with Azure OpenAI (audit rows with channel `chat` under the session user) |
 | Helm, local + prod values, probes, limits, Secrets, PVCs, Ingress | `make charts-check` (lint + kubeconform, both envs); workload policy check; cluster |
 | Runs on k3d and k3s | Cluster: `make up && make e2e` |

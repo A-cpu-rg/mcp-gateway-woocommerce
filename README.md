@@ -30,7 +30,7 @@ permissions and an audit log of every call.
 
 ## Local setup (k3d)
 
-Requirements: Docker, [k3d](https://k3d.io) ≥ 5.6, kubectl, Helm 3, Node ≥ 22.19 (24 recommended; see `.node-version`), pnpm 10, openssl.
+Requirements: Docker, [k3d](https://k3d.io) ≥ 5.6, kubectl, Helm 3 or 4, Node ≥ 22.19 (24 recommended; see `.node-version`), pnpm 10, openssl.
 
 ```bash
 pnpm install
@@ -127,6 +127,15 @@ Dashboard → **Servers**: status (Connected / Unreachable with reason / Disable
 by URL with an optional bearer or custom-header credential, edit, disable, remove, and mark tools admin-only.
 The WooCommerce server is pre-registered on first start.
 
+### Stores (multi-store bonus)
+Dashboard → **Stores** → name + slug → **Create store**. Any user may create up to 2 stores (`stores.maxPerUser`);
+admins see and can delete all of them. A store goes **Provisioning → Ready** in about 3–5 minutes and gets:
+namespace `store-<slug>`, its own MariaDB, WordPress volume, Secrets, ResourceQuota and LimitRange,
+the storefront at `http://<slug>.store.localtest.me`, and its own WooCommerce MCP server, registered in the
+gateway as `store-<slug>` (tools `store-<slug>__list_orders`, …). **Delete** hides its tools at once, then removes
+the registration, the Helm release and the namespace (volumes and Secrets with it). A store that cannot be
+provisioned within 15 minutes becomes **Failed** with the reason; **Retry** runs the same idempotent steps again.
+
 ## Testing
 
 | What | Command | Needs |
@@ -140,7 +149,8 @@ CI (`.github/workflows/ci.yml`) runs the first three on every push.
 
 ## Verification status
 
-Verified on local k3d (k3s v1.33.5, Helm 3.17.3, Docker Desktop with 4 GB RAM), 2026-10-22:
+Verified on local k3d (k3s v1.33.5, Helm 4.3.1 on the laptop and 3.17.3 in the store-provisioner image,
+Docker Desktop with 4 GB RAM), 2026-10-22:
 
 | Check | How | Result |
 |---|---|---|
@@ -155,10 +165,18 @@ Verified on local k3d (k3s v1.33.5, Helm 3.17.3, Docker Desktop with 4 GB RAM), 
 | NetworkPolicies | Probe pods + `exec` from real pods | Only the gateway reaches `woocommerce-mcp`; upstreams have no egress; control request succeeds |
 | Helm upgrade and rollback | `helm upgrade … --set …`, `helm rollback platform 1` | Value applied, then restored; data and servers intact |
 | Gateway requirements, live | Add/edit/disable/remove a server (header and bearer credentials), `echo` on two servers, a 2 s timeout on a slow tool, credential leak scan of API/MCP/dashboard bundle, member 403s, audit fields | All pass; new servers are listed by both replicas immediately |
+| Bonus: multi-store, live | Two stores created at once from the API; provisioner restarted mid-install; cross-store probes; chat "compare today's orders across north and south"; delete one | Both Ready after the restart; isolation holds; chat called `store-north__list_orders` + `store-south__list_orders`; after delete: tools, registration, namespace, both PVs and Secrets gone; a foreign `store-*` namespace makes the store Failed with a reason and is never deleted |
 | Workloads and Secrets, live | Live Deployments/StatefulSets; live pod env; `pg_dump` of the gateway DB | Probes and requests/limits on every workload; credentials only via Secrets; no raw API key or upstream credential in Postgres |
 
-Not yet verified: a VPS / k3s deployment with TLS (`values-prod.yaml`), and Claude Code or Cursor as the
-client (MCP Inspector was used). Re-run `make up && make e2e` before recording the video.
+Claude Code as the external client was verified on 2026-10-25: connected as a member with only the gateway
+URL and that member's key, it listed tools and ran `woocommerce__list_products` + `toolbox__convert_currency`
+in one task, both audited to that member.
+
+Not yet verified: a VPS / k3s deployment with TLS (`values-prod.yaml`), Cursor as the client, and the
+store-owner permission for admin-only tools (migration `003_server_store.sql`; covered by tests, not yet
+deployed to k3d). With 3 stores the 4 GB Docker VM runs at about 70% memory, and host sleep makes probes
+time out on wake (pods restart cleanly): disable sleep while recording. Re-run `make up && make e2e` before
+recording the video.
 
 ## Stand-out items attempted
 
@@ -170,5 +188,6 @@ client (MCP Inspector was used). Re-run `make up && make e2e` before recording t
 | Observability: per-call audit with outcome + duration, upstream unreachable reasons | Dashboard → Audit / Servers |
 | Upgrades and rollback | [docs/design.md](docs/design.md#upgrades-and-rollback) |
 | Production-like VPS | Instructions above; values in `values-prod.yaml` |
+| **Bonus: multi-store provisioning** | `apps/gateway/src/{stores,provisioner,kube}.ts`, `deploy/charts/platform/templates/provisioner.yaml`, `deploy/charts/store/templates/guardrails.yaml`, Dashboard → Stores; design in [docs/design.md](docs/design.md#multi-store-provisioning) |
 
-Not attempted: multi-store provisioning bonus, OAuth on the gateway, hosted MCP servers by image, metrics endpoint.
+Not attempted: OAuth on the gateway, hosted MCP servers by image, metrics endpoint.

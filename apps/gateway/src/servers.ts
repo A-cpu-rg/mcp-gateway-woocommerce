@@ -46,11 +46,21 @@ export interface ServerDeps {
   allowedHosts: string[];
 }
 
-export async function createServer(d: ServerDeps, input: ServerInput): Promise<ServerRow> {
+/**
+ * `check: false` registers without connecting: the store-provisioner uses it, because store NetworkPolicies
+ * admit only gateway pods, so the gateway's own health check is what moves the server to "connected".
+ * `storeId` links the server to the store it serves (its owner may use admin-only tools); it is set only by
+ * the store-provisioner, never from API input.
+ */
+export async function createServer(
+  d: ServerDeps,
+  input: ServerInput,
+  opts: { check?: boolean; storeId?: string } = {},
+): Promise<ServerRow> {
   const url = await validateUpstreamUrl(input.url, d.allowedHosts);
   const { rows } = await d.db.query<ServerRow>(
-    `INSERT INTO upstream_servers (slug, name, url, enabled, auth_type, auth_header, credential_enc, timeout_ms, admin_only_tools)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+    `INSERT INTO upstream_servers (slug, name, url, enabled, auth_type, auth_header, credential_enc, timeout_ms, admin_only_tools, store_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
     [
       input.slug,
       input.name,
@@ -61,10 +71,11 @@ export async function createServer(d: ServerDeps, input: ServerInput): Promise<S
       input.credential ? encrypt(d.key, input.credential) : null,
       input.timeoutMs,
       input.adminOnlyTools,
+      opts.storeId ?? null,
     ],
   );
   const row = rows[0] as ServerRow;
-  await d.pool.check(row);
+  if (opts.check !== false) await d.pool.check(row);
   return row;
 }
 

@@ -1,0 +1,30 @@
+# Per-store guardrails. Every store namespace gets them, the first store and provisioned ones alike.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: store-quota
+  labels: {{- include "store.labels" . | nindent 4 }}
+spec:
+  hard:
+    requests.cpu: {{ .Values.quota.requests.cpu | quote }}
+    requests.memory: {{ .Values.quota.requests.memory | quote }}
+    limits.cpu: {{ .Values.quota.limits.cpu | quote }}
+    limits.memory: {{ .Values.quota.limits.memory | quote }}
+    pods: {{ .Values.quota.pods | quote }}
+    persistentvolumeclaims: {{ .Values.quota.pvcs | quote }}
+    requests.storage: {{ .Values.quota.storage | quote }}
+    services.loadbalancers: "0"
+    services.nodeports: "0"
+---
+# Defaults for any container without requests/limits, and a ceiling per container.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: store-limits
+  labels: {{- include "store.labels" . | nindent 4 }}
+spec:
+  limits:
+    - type: Container
+      defaultRequest: { cpu: 50m, memory: 64Mi }
+      default: { cpu: 500m, memory: 256Mi }
+      max: { cpu: "2", memory: 1Gi }

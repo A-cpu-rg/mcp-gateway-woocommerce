@@ -33,6 +33,24 @@ gateway:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { cpu: "1", memory: 384Mi }
 
+# Multi-store provisioning (bonus): users create stores from the dashboard; the store-provisioner installs
+# the store chart into store-<slug> and registers its MCP server as store-<slug>.
+stores:
+  enabled: true
+  hostTemplate: "{slug}.store.localtest.me"
+  maxPerUser: 2
+  timeoutMinutes: 15
+  concurrency: 3
+
+provisioner:
+  image: urumi/store-provisioner:dev
+  pullPolicy: IfNotPresent
+  storeValuesFile: values-local.yaml   # which store chart values file new stores use
+  apiServerCidr: 0.0.0.0/0             # narrow to your API server address if known (k3s: node IP/32)
+  resources:
+    requests: { cpu: 50m, memory: 96Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+
 postgres:
   image: postgres:17.11-alpine
   storage: 1Gi

@@ -1,0 +1,120 @@
+{{- if .Values.stores.enabled }}
+# store-provisioner: the only component that talks to the Kubernetes API. Not exposed (no Service, no
+# Ingress, NetworkPolicy allows no ingress). The gateway itself has no Kubernetes credentials.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: store-provisioner
+  labels: {{- include "platform.labels" . | nindent 4 }}
+---
+# What one store needs: its namespace, and the kinds the store chart creates (plus Helm's release Secrets and
+# what `helm --wait` watches). Store namespaces are created at runtime, so this has to be a ClusterRole; the
+# provisioner additionally refuses any namespace outside store-* and never deletes one it did not label.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Namespace }}-store-provisioner
+  labels: {{- include "platform.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list, create, delete]
+  - apiGroups: [""]
+    resources: [secrets, configmaps, services, persistentvolumeclaims, resourcequotas, limitranges]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [pods, events]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets, replicasets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses, networkpolicies]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Namespace }}-store-provisioner
+  labels: {{- include "platform.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Release.Namespace }}-store-provisioner
+subjects:
+  - kind: ServiceAccount
+    name: store-provisioner
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: store-provisioner
+  labels: {{- include "platform.labels" . | nindent 4 }}
+    app.kubernetes.io/name: store-provisioner
+spec:
+  replicas: 1
+  # Work is leased in Postgres, so two pods would be safe; Recreate just avoids needless overlap.
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app.kubernetes.io/name: store-provisioner }
+  template:
+    metadata:
+      labels: {{- include "platform.labels" . | nindent 8 }}
+        app.kubernetes.io/name: store-provisioner
+    spec:
+      serviceAccountName: store-provisioner
+      automountServiceAccountToken: true
+      securityContext: {{- include "platform.podSecurity" . | nindent 8 }}
+      containers:
+        - name: store-provisioner
+          image: {{ .Values.provisioner.image }}
+          imagePullPolicy: {{ .Values.provisioner.pullPolicy }}
+          securityContext: {{- include "platform.restricted" . | nindent 12 }}
+          env:
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ .Values.secrets.postgres }}, key: POSTGRES_PASSWORD } }
+            - name: ENCRYPTION_KEY
+              valueFrom: { secretKeyRef: { name: {{ .Values.secrets.gateway }}, key: ENCRYPTION_KEY } }
+            - { name: DATABASE_URL, value: "postgres://gateway:$(POSTGRES_PASSWORD)@postgres:5432/gateway" }
+            - { name: GATEWAY_NAMESPACE, value: {{ .Release.Namespace | quote }} }
+            - { name: STORE_CHART_DIR, value: /app/charts/store }
+            - { name: STORE_VALUES_FILE, value: "/app/charts/store/{{ .Values.provisioner.storeValuesFile }}" }
+            - { name: PROVISION_CONCURRENCY, value: {{ .Values.stores.concurrency | quote }} }
+            - { name: UPSTREAM_ALLOWED_HOSTS, value: {{ .Values.gateway.upstreamAllowedHosts | quote }} }
+            - { name: HOME, value: /tmp }
+            - { name: HELM_CACHE_HOME, value: /tmp/helm/cache }
+            - { name: HELM_CONFIG_HOME, value: /tmp/helm/config }
+            - { name: HELM_DATA_HOME, value: /tmp/helm/data }
+          ports: [{ name: http, containerPort: 8080 }]
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 20
+          resources: {{- toYaml .Values.provisioner.resources | nindent 12 }}
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]
+      volumes: [{ name: tmp, emptyDir: {} }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: store-provisioner
+  labels: {{- include "platform.labels" . | nindent 4 }}
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/name: store-provisioner } }
+  policyTypes: ["Ingress", "Egress"]
+  ingress: []   # nothing calls the provisioner
+  egress:
+    - to: [{ podSelector: { matchLabels: { app.kubernetes.io/name: postgres } } }]
+      ports: [{ port: 5432 }]
+    # The Kubernetes API server. Its address depends on the cluster (k3s: node IP :6443; service :443).
+    - to: [{ ipBlock: { cidr: {{ .Values.provisioner.apiServerCidr | quote }} } }]
+      ports: [{ port: 443 }, { port: 6443 }]
+{{- end }}

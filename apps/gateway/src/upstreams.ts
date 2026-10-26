@@ -19,6 +19,10 @@ export interface ServerRow {
   credential_enc: Buffer | null;
   timeout_ms: number;
   admin_only_tools: string[];
+  /** The store this server was provisioned for (set by the store-provisioner only). */
+  store_id: string | null;
+  /** Owner of that store; only on rows read through UpstreamPool, which joins it in. */
+  store_owner_id?: string | null;
   status: string;
   last_error: string | null;
   last_checked_at: Date | null;
@@ -47,6 +51,10 @@ const MAX_DESCRIPTION = 1024;
 const MAX_RESULT_BYTES = 512 * 1024;
 const MAX_IN_FLIGHT = 32;
 const LIST_TIMEOUT_MS = 5000;
+// The store owner is read together with the server's configuration, so authorization always uses the
+// current owner from the database, never a cached or client-supplied ownership claim.
+const SELECT_SERVERS = `SELECT us.*, st.owner_id AS store_owner_id
+  FROM upstream_servers us LEFT JOIN stores st ON st.id = us.store_id`;
 
 /**
  * Collision-free naming: slugs are unique and cannot contain "_", so "<slug>__" is an unambiguous prefix.
@@ -120,12 +128,11 @@ export class UpstreamPool {
   }
 
   async servers(): Promise<ServerRow[]> {
-    return (await this.#db.query<ServerRow>('SELECT * FROM upstream_servers ORDER BY created_at')).rows;
+    return (await this.#db.query<ServerRow>(`${SELECT_SERVERS} ORDER BY us.created_at`)).rows;
   }
 
   async serverBySlug(slug: string): Promise<ServerRow | undefined> {
-    return (await this.#db.query<ServerRow>('SELECT * FROM upstream_servers WHERE slug = $1', [slug]))
-      .rows[0];
+    return (await this.#db.query<ServerRow>(`${SELECT_SERVERS} WHERE us.slug = $1`, [slug])).rows[0];
   }
 
   /** Cached tools of a server; empty until the first successful health check. */

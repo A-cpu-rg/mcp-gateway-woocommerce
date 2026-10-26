@@ -40,7 +40,9 @@ spec:
     # In-namespace upstreams (toolbox, everything).
     - to: [{ podSelector: { matchLabels: { mcp.urumi.io/upstream: "true" } } }]
       ports: [{ port: 8080 }]
-    # MCP servers in store namespaces.
+    # MCP servers in store namespaces: the configured ones and every provisioned store (labelled by the provisioner).
+    - to: [{ namespaceSelector: { matchLabels: { urumi.io/store: "true" } } }]
+      ports: [{ port: 8080 }]
     {{- range .Values.upstreamNamespaces }}
     - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: {{ . }} } } }]
       ports: [{ port: 8080 }]
@@ -61,7 +63,9 @@ spec:
   podSelector: { matchLabels: { app.kubernetes.io/name: postgres } }
   policyTypes: ["Ingress"]
   ingress:
-    - from: [{ podSelector: { matchLabels: { app.kubernetes.io/name: gateway } } }]
+    - from:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: gateway } }
+        - podSelector: { matchLabels: { app.kubernetes.io/name: store-provisioner } }
       ports: [{ port: 5432 }]
 ---
 # Upstream MCP servers: only the gateway may call them, and they get no egress at all

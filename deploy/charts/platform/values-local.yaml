@@ -8,3 +8,6 @@ toolbox:
 everything:
   image: urumi/everything-mcp:dev
   pullPolicy: Never
+provisioner:
+  image: urumi/store-provisioner:dev
+  pullPolicy: Never
