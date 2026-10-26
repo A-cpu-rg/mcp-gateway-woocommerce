@@ -118,6 +118,13 @@ spec:
         (has(object.metadata.labels) && 'urumi.io/store-id' in object.metadata.labels &&
          object.metadata.labels['urumi.io/store'] == 'true')
       message: namespaces created by the store-provisioner must carry the urumi.io/store and store-id labels
+    # Pod Security baseline, so the workloads it may create there cannot be privileged or mount the host. It
+    # cannot relabel a namespace afterwards (no update/patch on namespaces).
+    - expression: >-
+        request.resource.resource != 'namespaces' || request.operation != 'CREATE' ||
+        (has(object.metadata.labels) && 'pod-security.kubernetes.io/enforce' in object.metadata.labels &&
+         object.metadata.labels['pod-security.kubernetes.io/enforce'] in ['baseline', 'restricted'])
+      message: namespaces created by the store-provisioner must enforce Pod Security baseline or restricted
     - expression: >-
         request.resource.resource != 'namespaces' || request.operation != 'DELETE' ||
         (has(oldObject.metadata.labels) && 'urumi.io/store-id' in oldObject.metadata.labels)

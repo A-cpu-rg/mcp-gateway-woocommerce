@@ -45,7 +45,9 @@ vap=$(doc ValidatingAdmissionPolicy platform-store-provisioner <<<"$all")
 grep -q "startsWith('store-')" <<<"$vap" || fail "admission policy restricting the provisioner to store-* is missing"
 grep -q "'urumi.io/store-id' in oldObject.metadata.labels" <<<"$vap" \
   || fail "admission policy does not limit namespace deletes to namespaces created as stores"
-pass "provisioner RBAC: no cluster-wide Secrets/workloads, tenant role bound per namespace, admission policy"
+grep -qF "labels['pod-security.kubernetes.io/enforce'] in ['baseline', 'restricted']" <<<"$vap" \
+  || fail "admission policy does not require Pod Security baseline on store namespaces"
+pass "provisioner RBAC: no cluster-wide Secrets/workloads, tenant role bound per namespace, admission policy (incl. Pod Security)"
 
 # Inside a store namespace the provisioner may create Secrets and read only the MCP token: the Secret rules of
 # the tenant role are exactly that (no list/watch/update/delete, no read of store-db / store-wp-admin).

@@ -134,9 +134,9 @@ store of desired state and the existing store chart as the unit of deployment.
 Dashboard ─▶ gateway /api/stores ─▶ Postgres: stores (desired state, status, reason, deadline, lease)
                                          ▲
 store-provisioner (own ServiceAccount) ──┘ claims work (FOR UPDATE SKIP LOCKED + 90 s lease, renewed)
-   ├─ namespace store-<slug>  (labels urumi.io/store=true, urumi.io/store-id=<id>)
+   ├─ namespace store-<slug>  (labels urumi.io/store=true, urumi.io/store-id=<id>, Pod Security baseline)
    ├─ Secrets (create if missing, never overwritten)
-   ├─ helm upgrade --install store deploy/charts/store -n store-<slug> --set host=<slug>.store.<domain> --wait
+   ├─ helm upgrade --install store deploy/charts/store -n store-<slug> -f <values file: host, title> --wait
    └─ registers gateway server store-<slug> (bearer token encrypted)  ─▶ gateway health check ─▶ Ready
 ```
 
@@ -181,6 +181,9 @@ which carry its annotations) and is harmless for teardown (the namespace deletio
 3. Ready stores are not reconciled, so their namespaces get the RoleBinding only when they are deleted. To
    bind them up front:
    `kubectl -n store-<slug> create rolebinding store-provisioner --clusterrole=platform-store-tenant --serviceaccount=platform:store-provisioner`
+   New store namespaces enforce Pod Security `baseline`; give existing ones the same label (the store chart's
+   pods comply, so nothing is evicted):
+   `kubectl label ns store-<slug> pod-security.kubernetes.io/enforce=baseline`
 4. Verify: `kubectl auth can-i get secrets -n platform --as=system:serviceaccount:platform:store-provisioner`
    must answer `no`, and the same check in a `store-<slug>` namespace `yes`.
 5. Roll back with `helm rollback platform <previous revision>` together with the previous provisioner image.

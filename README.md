@@ -173,9 +173,13 @@ Claude Code as the external client was verified on 2026-10-25: connected as a me
 URL and that member's key, it listed tools and ran `woocommerce__list_products` + `toolbox__convert_currency`
 in one task, both audited to that member.
 
-Not yet verified: a VPS / k3s deployment with TLS (`values-prod.yaml`), Cursor as the client, and the
-store-owner permission for admin-only tools (migration `003_server_store.sql`; covered by tests, not yet
-deployed to k3d). With 3 stores the 4 GB Docker VM runs at about 70% memory, and host sleep makes probes
+On 2026-10-26 the current code was deployed to the same k3d cluster with `make images import deploy-local`
+(migrations `003`/`004` applied, existing stores and data intact) and verified live: the provisioner's
+`kubectl auth can-i` rights and admission policy (including Pod Security `baseline` for store namespaces),
+and a disposable store created, called through the gateway (`list_products`) and deleted (namespace, PVs,
+registration and tools gone). Details: [docs/submission-readiness.md](docs/submission-readiness.md).
+
+Not yet verified: a VPS / k3s deployment with TLS (`values-prod.yaml`) and Cursor as the client. With 3 stores the 4 GB Docker VM runs at about 70% memory, and host sleep makes probes
 time out on wake (pods restart cleanly): disable sleep while recording. Re-run `make up && make e2e` before
 recording the video.
 

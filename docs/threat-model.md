@@ -99,6 +99,11 @@ and results reach the model and the team's MCP clients. What it can try, and wha
     read, update or delete `store-db`, `store-wp-admin` or `store-wc-api`, and never requests them.
   - Namespace deletion: only `store-*` namespaces that carry a `urumi.io/store-id` label (created as a
     store); the code also checks that the id matches the store row before deleting.
+  - Pod Security: store namespaces are created with `pod-security.kubernetes.io/enforce: baseline`, which the
+    admission policy requires, and the provisioner has no right to relabel a namespace. The workloads it may
+    create there therefore cannot be privileged, use host namespaces or mount host paths, so they cannot be
+    used to reach the node (on single-node k3s, the whole cluster). Store namespaces created before this
+    label existed must be labelled by hand ([design.md](design.md#provisioner-rbac-migration)).
   - It refuses to start when it holds rights it must not have (Secrets in `platform`, Secrets cluster-wide,
     Deployments/Pods in `kube-system`, ClusterRole updates), so an image upgraded without the chart, or
     widened RBAC, stops it with a clear log line instead of operating with them. An existing RoleBinding

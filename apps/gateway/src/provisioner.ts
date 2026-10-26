@@ -34,6 +34,10 @@ export interface ProvisionerDeps {
 
 const LABEL_STORE = 'urumi.io/store';
 const LABEL_STORE_ID = 'urumi.io/store-id';
+// Pod Security Admission: no privileged, hostPath or host-namespace pods in a store namespace, so whoever can
+// create workloads there (the tenant role) cannot use them to reach the node. "restricted" would reject the
+// official WordPress image (Apache starts as root). The admission policy requires this label on create.
+const LABEL_POD_SECURITY = 'pod-security.kubernetes.io/enforce';
 const hex = (bytes: number) => randomBytes(bytes).toString('hex');
 const defaultMcpUrl = (ns: string) => `http://woocommerce-mcp.${ns}.svc.cluster.local:8080/mcp`;
 
@@ -171,7 +175,13 @@ export class Provisioner {
       throw new PermanentError(`namespace ${row.namespace} already exists and does not belong to this store`);
     }
     if (ns?.terminating) throw new Error(`namespace ${row.namespace} is still terminating`);
-    if (!ns) await kube.createNamespace(row.namespace, { [LABEL_STORE]: 'true', [LABEL_STORE_ID]: row.id });
+    if (!ns) {
+      await kube.createNamespace(row.namespace, {
+        [LABEL_STORE]: 'true',
+        [LABEL_STORE_ID]: row.id,
+        [LABEL_POD_SECURITY]: 'baseline',
+      });
+    }
     await kube.ensureAccess(row.namespace);
     const owner = (await db.query<{ email: string }>('SELECT email FROM users WHERE id = $1', [row.owner_id]))
       .rows[0];

@@ -200,6 +200,8 @@ describe('stores', { skip }, () => {
     const ns = kube.namespaces.get('store-acme');
     assert.equal(ns?.labels['urumi.io/store'], 'true');
     assert.equal(ns?.labels['urumi.io/store-id'], acme.id);
+    // Pod Security "baseline": no privileged or hostPath pods, so store workloads cannot reach the node.
+    assert.equal(ns?.labels['pod-security.kubernetes.io/enforce'], 'baseline');
     for (const s of ['store-db', 'store-wp-admin', 'store-wc-api', 'woocommerce-mcp-auth'])
       assert.ok(kube.secrets.has(`store-acme/${s}`), s);
     assert.ok(helm.calls.includes('install store-acme host=acme.store.localtest.me'));
